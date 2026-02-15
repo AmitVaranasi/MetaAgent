@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import AgentConfig, Task
+from .models import AgentConfig, Task, Workflow, WorkflowStatus
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -28,7 +28,26 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
+
+CREATE TABLE IF NOT EXISTS workflows (
+    id TEXT PRIMARY KEY,
+    prompt TEXT NOT NULL,
+    plan TEXT,
+    status TEXT NOT NULL DEFAULT 'planning',
+    brain_agent_id TEXT NOT NULL,
+    brain_task_id TEXT,
+    subtask_ids_json TEXT NOT NULL DEFAULT '[]',
+    result TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
 """
+
+_MIGRATIONS = [
+    "ALTER TABLE tasks ADD COLUMN workflow_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN parent_task_id TEXT",
+]
 
 
 class Database:
@@ -40,6 +59,15 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        for sql in _MIGRATIONS:
+            try:
+                self._conn.execute(sql)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def close(self) -> None:
         self._conn.close()
@@ -76,8 +104,8 @@ class Database:
         self._conn.execute(
             """INSERT OR REPLACE INTO tasks
                (id, agent_id, status, prompt, messages_json, result, error,
-                session_id, created_at, completed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                session_id, created_at, completed_at, workflow_id, parent_task_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.agent_id,
@@ -89,6 +117,8 @@ class Database:
                 task.session_id,
                 task.created_at.isoformat(),
                 task.completed_at.isoformat() if task.completed_at else None,
+                task.workflow_id,
+                task.parent_task_id,
             ),
         )
         self._conn.commit()
@@ -123,6 +153,65 @@ class Database:
             result=row["result"],
             error=row["error"],
             session_id=row["session_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            completed_at=(
+                datetime.fromisoformat(row["completed_at"])
+                if row["completed_at"]
+                else None
+            ),
+            workflow_id=row["workflow_id"],
+            parent_task_id=row["parent_task_id"],
+        )
+
+    # --- Workflow CRUD ---
+
+    def save_workflow(self, workflow: Workflow) -> None:
+        self._conn.execute(
+            """INSERT OR REPLACE INTO workflows
+               (id, prompt, plan, status, brain_agent_id, brain_task_id,
+                subtask_ids_json, result, error, created_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                workflow.id,
+                workflow.prompt,
+                workflow.plan,
+                workflow.status.value,
+                workflow.brain_agent_id,
+                workflow.brain_task_id,
+                json.dumps(workflow.subtask_ids),
+                workflow.result,
+                workflow.error,
+                workflow.created_at.isoformat(),
+                workflow.completed_at.isoformat() if workflow.completed_at else None,
+            ),
+        )
+        self._conn.commit()
+
+    def get_workflow(self, workflow_id: str) -> Workflow | None:
+        row = self._conn.execute(
+            "SELECT * FROM workflows WHERE id = ?", (workflow_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_workflow(row)
+
+    def list_workflows(self) -> list[Workflow]:
+        rows = self._conn.execute(
+            "SELECT * FROM workflows ORDER BY created_at DESC"
+        ).fetchall()
+        return [self._row_to_workflow(r) for r in rows]
+
+    def _row_to_workflow(self, row: sqlite3.Row) -> Workflow:
+        return Workflow(
+            id=row["id"],
+            prompt=row["prompt"],
+            plan=row["plan"],
+            status=WorkflowStatus(row["status"]),
+            brain_agent_id=row["brain_agent_id"],
+            brain_task_id=row["brain_task_id"],
+            subtask_ids=json.loads(row["subtask_ids_json"]),
+            result=row["result"],
+            error=row["error"],
             created_at=datetime.fromisoformat(row["created_at"]),
             completed_at=(
                 datetime.fromisoformat(row["completed_at"])

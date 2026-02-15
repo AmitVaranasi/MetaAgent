@@ -56,3 +56,27 @@ class Task(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     session_id: str | None = None
+    workflow_id: str | None = None
+    parent_task_id: str | None = None
+
+
+class WorkflowStatus(str, Enum):
+    PLANNING = "planning"
+    EXECUTING = "executing"
+    ASSEMBLING = "assembling"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class Workflow(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex[:12])
+    prompt: str
+    plan: str | None = None
+    status: WorkflowStatus = WorkflowStatus.PLANNING
+    brain_agent_id: str
+    brain_task_id: str | None = None
+    subtask_ids: list[str] = Field(default_factory=list)
+    result: str | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None

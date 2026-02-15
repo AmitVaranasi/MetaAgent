@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .agent_runner import AgentRunner
 from .db import Database
+from .external_runner import ExternalModelRunner
 from .models import AgentConfig, AgentState, AgentStatus, Task
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,13 @@ class AgentManager:
 
     # --- Task submission ---
 
-    def submit_task(self, agent_id: str, prompt: str) -> Task:
+    def submit_task(
+        self,
+        agent_id: str,
+        prompt: str,
+        workflow_id: str | None = None,
+        parent_task_id: str | None = None,
+    ) -> Task:
         """Submit a task to an agent. Runs via SDK in the background event loop."""
         with self._lock:
             state = self._agents.get(agent_id)
@@ -82,6 +89,8 @@ class AgentManager:
             agent_id=agent_id,
             prompt=prompt,
             created_at=datetime.now(timezone.utc),
+            workflow_id=workflow_id,
+            parent_task_id=parent_task_id,
         )
         self.db.save_task(task)
 
@@ -111,7 +120,12 @@ class AgentManager:
                 f.write(f"{msg}\n")
 
         try:
-            result = await runner.run_task(task, on_message=on_message)
+            state = self._agents[agent_id]
+            if state.config.model.startswith("external:"):
+                ext_runner = ExternalModelRunner(state.config.model)
+                result = await ext_runner.run(task.prompt, state.config.system_prompt)
+            else:
+                result = await runner.run_task(task, on_message=on_message)
             task.status = "completed"
             task.result = result
             task.completed_at = datetime.now(timezone.utc)

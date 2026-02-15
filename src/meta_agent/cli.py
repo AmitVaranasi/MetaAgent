@@ -191,6 +191,122 @@ def mcp_server(ctx: click.Context) -> None:
 
 
 @main.command()
+@click.argument("prompt")
+@click.option("--wait", is_flag=True, help="Wait for workflow completion")
+@click.pass_context
+def brain(ctx: click.Context, prompt: str, wait: bool) -> None:
+    """Submit a task to the Brain agent for automatic orchestration."""
+    import time
+
+    from .brain import BRAIN_AGENT_ID, get_brain_config
+    from .models import Workflow
+
+    mgr = _make_manager(ctx.obj["data_dir"])
+
+    # Ensure brain agent exists
+    if mgr.get_agent(BRAIN_AGENT_ID) is None:
+        brain_config = get_brain_config(["meta-agent", "mcp-server"])
+        mgr.register_agent(brain_config)
+        console.print("[green]Brain agent registered[/green]")
+
+    # Create workflow
+    workflow = Workflow(prompt=prompt, brain_agent_id=BRAIN_AGENT_ID)
+    mgr.db.save_workflow(workflow)
+
+    # Submit to brain with the workflow context
+    brain_prompt = (
+        f"Workflow ID: {workflow.id}\n\n"
+        f"User Request: {prompt}\n\n"
+        "Please analyze this task, create a workflow plan, decompose into subtasks "
+        "if needed, and execute. Use the workflow tools to track progress."
+    )
+    try:
+        task = mgr.submit_task(BRAIN_AGENT_ID, brain_prompt, workflow_id=workflow.id)
+        console.print(
+            f"[green]Workflow {workflow.id} created, brain task {task.id} submitted[/green]"
+        )
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+    if not wait:
+        console.print("Use 'meta-agent workflow' to check status")
+        return
+
+    # Poll until completion
+    console.print("[dim]Waiting for completion...[/dim]")
+    while True:
+        time.sleep(3)
+        t = mgr.get_task(task.id)
+        if t is None:
+            break
+        if t.status in ("completed", "failed"):
+            wf = mgr.db.get_workflow(workflow.id)
+            if t.status == "completed":
+                console.print(f"[green]Workflow completed[/green]")
+                if t.result:
+                    console.print(t.result)
+            else:
+                console.print(f"[red]Workflow failed: {t.error}[/red]")
+            break
+        console.print(f"[dim]  Status: {t.status}...[/dim]")
+
+
+@main.command()
+@click.argument("workflow_id", required=False)
+@click.pass_context
+def workflow(ctx: click.Context, workflow_id: str | None) -> None:
+    """List workflows or show workflow detail with subtask tree."""
+    mgr = _make_manager(ctx.obj["data_dir"])
+
+    if workflow_id:
+        wf = mgr.db.get_workflow(workflow_id)
+        if wf is None:
+            console.print(f"[red]Workflow {workflow_id} not found[/red]")
+            sys.exit(1)
+        console.print(f"[bold]Workflow {wf.id}[/bold]")
+        console.print(f"  Status: {wf.status.value}")
+        console.print(f"  Prompt: {wf.prompt}")
+        if wf.plan:
+            console.print(f"  Plan: {wf.plan}")
+        if wf.result:
+            console.print(f"  Result: {wf.result[:500]}")
+        if wf.error:
+            console.print(f"  [red]Error: {wf.error}[/red]")
+        if wf.subtask_ids:
+            console.print(f"\n  [bold]Subtasks ({len(wf.subtask_ids)}):[/bold]")
+            for tid in wf.subtask_ids:
+                t = mgr.get_task(tid)
+                if t:
+                    status_color = {"completed": "green", "failed": "red"}.get(t.status, "yellow")
+                    console.print(
+                        f"    [{status_color}]{t.id}[/{status_color}] "
+                        f"agent={t.agent_id} status={t.status} "
+                        f"prompt={t.prompt[:60]}"
+                    )
+    else:
+        workflows = mgr.db.list_workflows()
+        if not workflows:
+            console.print("[dim]No workflows.[/dim]")
+            return
+        table = Table(title="Workflows")
+        table.add_column("ID")
+        table.add_column("Status")
+        table.add_column("Prompt", max_width=50)
+        table.add_column("Subtasks")
+        table.add_column("Created")
+        for wf in workflows[:20]:
+            table.add_row(
+                wf.id,
+                wf.status.value,
+                wf.prompt[:50],
+                str(len(wf.subtask_ids)),
+                str(wf.created_at)[:19],
+            )
+        console.print(table)
+
+
+@main.command()
 @click.option("--port", default=5555, help="Dashboard port")
 @click.option("--host", default="127.0.0.1", help="Dashboard host")
 @click.pass_context

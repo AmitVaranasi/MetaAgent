@@ -5,7 +5,7 @@ from __future__ import annotations
 from flask import Blueprint, current_app, jsonify, render_template, request
 
 from ..agent_manager import AgentManager
-from ..models import AgentConfig, AgentStatus
+from ..models import AgentConfig, AgentStatus, Workflow
 
 bp = Blueprint("dashboard", __name__)
 
@@ -151,4 +151,89 @@ def api_task_status(task_id: str):
         "error": task.error,
         "created_at": str(task.created_at),
         "completed_at": str(task.completed_at) if task.completed_at else None,
+    })
+
+
+# --- Workflow API ---
+
+@bp.route("/api/workflows")
+def api_list_workflows():
+    workflows = _mgr().db.list_workflows()
+    return jsonify([
+        {
+            "id": w.id,
+            "prompt": w.prompt[:100],
+            "status": w.status.value,
+            "subtask_count": len(w.subtask_ids),
+            "created_at": str(w.created_at),
+            "completed_at": str(w.completed_at) if w.completed_at else None,
+        }
+        for w in workflows
+    ])
+
+
+@bp.route("/api/workflows", methods=["POST"])
+def api_create_workflow():
+    data = request.get_json()
+    if not data or "prompt" not in data:
+        return jsonify({"error": "JSON body with 'prompt' required"}), 400
+
+    from ..brain import BRAIN_AGENT_ID, get_brain_config
+
+    mgr = _mgr()
+
+    # Ensure brain agent exists
+    if mgr.get_agent(BRAIN_AGENT_ID) is None:
+        brain_config = get_brain_config(["meta-agent", "mcp-server"])
+        mgr.register_agent(brain_config)
+
+    workflow = Workflow(prompt=data["prompt"], brain_agent_id=BRAIN_AGENT_ID)
+    mgr.db.save_workflow(workflow)
+
+    brain_prompt = (
+        f"Workflow ID: {workflow.id}\n\n"
+        f"User Request: {data['prompt']}\n\n"
+        "Please analyze this task, create a workflow plan, decompose into subtasks "
+        "if needed, and execute. Use the workflow tools to track progress."
+    )
+    try:
+        task = mgr.submit_task(BRAIN_AGENT_ID, brain_prompt, workflow_id=workflow.id)
+        return jsonify({
+            "workflow_id": workflow.id,
+            "task_id": task.id,
+            "status": workflow.status.value,
+        }), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/api/workflows/<workflow_id>")
+def api_get_workflow(workflow_id: str):
+    workflow = _mgr().db.get_workflow(workflow_id)
+    if workflow is None:
+        return jsonify({"error": "not found"}), 404
+    subtasks = []
+    for tid in workflow.subtask_ids:
+        task = _mgr().get_task(tid)
+        if task:
+            subtasks.append({
+                "id": task.id,
+                "agent_id": task.agent_id,
+                "status": task.status,
+                "prompt": task.prompt[:100],
+                "result": task.result[:200] if task.result else None,
+                "error": task.error,
+            })
+    return jsonify({
+        "id": workflow.id,
+        "prompt": workflow.prompt,
+        "plan": workflow.plan,
+        "status": workflow.status.value,
+        "brain_agent_id": workflow.brain_agent_id,
+        "brain_task_id": workflow.brain_task_id,
+        "subtasks": subtasks,
+        "result": workflow.result,
+        "error": workflow.error,
+        "created_at": str(workflow.created_at),
+        "completed_at": str(workflow.completed_at) if workflow.completed_at else None,
     })

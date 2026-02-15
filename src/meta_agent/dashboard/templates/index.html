@@ -42,6 +42,36 @@
 <body>
     <h1>Meta-Agent Dashboard</h1>
 
+    <!-- Brain Workflow Section -->
+    <div class="section">
+        <h2>Brain Workflow</h2>
+        <div class="card">
+            <form id="brainForm">
+                <div class="form-row">
+                    <div class="form-group" style="flex:1">
+                        <label>Task Prompt</label>
+                        <input type="text" name="prompt" placeholder="Describe your task for the Brain..." required style="width:100%">
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="align-self:end">Submit to Brain</button>
+                </div>
+            </form>
+        </div>
+        <div id="workflows" style="margin-top:12px">
+            <table>
+                <thead>
+                    <tr><th>ID</th><th>Status</th><th>Prompt</th><th>Subtasks</th><th>Created</th><th></th></tr>
+                </thead>
+                <tbody id="workflowsBody"></tbody>
+            </table>
+        </div>
+        <div id="workflowDetail" class="card" style="display:none; margin-top:12px">
+            <h3 id="wfDetailTitle"></h3>
+            <div id="wfDetailPlan" class="meta"></div>
+            <div id="wfDetailResult" class="meta"></div>
+            <div id="wfDetailSubtasks"></div>
+        </div>
+    </div>
+
     <!-- Create Agent Form -->
     <div class="section">
         <h2>Create Agent</h2>
@@ -209,11 +239,64 @@
             fetchTasks();
         });
 
+        // --- Workflows ---
+        async function fetchWorkflows() {
+            const res = await fetch('/api/workflows');
+            const workflows = await res.json();
+            const tbody = document.getElementById('workflowsBody');
+            tbody.innerHTML = workflows.map(w => `
+                <tr>
+                    <td>${w.id}</td>
+                    <td><span class="${badgeClass(w.status)}">${w.status}</span></td>
+                    <td>${w.prompt}</td>
+                    <td>${w.subtask_count}</td>
+                    <td>${w.created_at ? w.created_at.substring(0,19) : ''}</td>
+                    <td><button class="btn" onclick="showWorkflow('${w.id}')">Detail</button></td>
+                </tr>
+            `).join('');
+        }
+
+        async function showWorkflow(id) {
+            const res = await fetch('/api/workflows/' + id);
+            const wf = await res.json();
+            document.getElementById('workflowDetail').style.display = 'block';
+            document.getElementById('wfDetailTitle').textContent = 'Workflow ' + wf.id + ' (' + wf.status + ')';
+            document.getElementById('wfDetailPlan').textContent = wf.plan ? 'Plan: ' + wf.plan : '';
+            document.getElementById('wfDetailResult').textContent = wf.result ? 'Result: ' + wf.result.substring(0, 500) : '';
+            const subtasksDiv = document.getElementById('wfDetailSubtasks');
+            if (wf.subtasks && wf.subtasks.length > 0) {
+                subtasksDiv.innerHTML = '<h4 style="margin-top:8px">Subtasks</h4>' +
+                    wf.subtasks.map(s => `
+                        <div class="meta" style="margin:4px 0; padding:4px 8px; background:#0d1117; border-radius:4px">
+                            <span class="${badgeClass(s.status)}">${s.status}</span>
+                            <strong>${s.id}</strong> (agent: ${s.agent_id}) — ${s.prompt}
+                            ${s.error ? '<div style="color:#f85149">Error: ' + s.error + '</div>' : ''}
+                        </div>
+                    `).join('');
+            } else {
+                subtasksDiv.innerHTML = '<div class="meta">No subtasks yet</div>';
+            }
+        }
+
+        document.getElementById('brainForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            await fetch('/api/workflows', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: fd.get('prompt') }),
+            });
+            e.target.reset();
+            fetchWorkflows();
+        });
+
         // Poll every 2 seconds
         fetchAgents();
         fetchTasks();
+        fetchWorkflows();
         setInterval(fetchAgents, 2000);
         setInterval(fetchTasks, 2000);
+        setInterval(fetchWorkflows, 2000);
     </script>
 </body>
 </html>

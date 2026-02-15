@@ -5,7 +5,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from .agent_manager import AgentManager
-from .models import AgentConfig
+from .models import AgentConfig, Workflow
 
 
 def create_mcp_server(manager: AgentManager) -> FastMCP:
@@ -112,10 +112,19 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         return manager.get_logs(agent_id, lines=lines)
 
     @mcp.tool()
-    def submit_task(agent_id: str, prompt: str) -> dict:
-        """Submit a task prompt to an agent for execution."""
+    def submit_task(
+        agent_id: str,
+        prompt: str,
+        workflow_id: str | None = None,
+        parent_task_id: str | None = None,
+    ) -> dict:
+        """Submit a task prompt to an agent for execution. Optionally link to a workflow."""
         try:
-            task = manager.submit_task(agent_id, prompt)
+            task = manager.submit_task(
+                agent_id, prompt,
+                workflow_id=workflow_id,
+                parent_task_id=parent_task_id,
+            )
             return {"task_id": task.id, "agent_id": agent_id, "status": task.status}
         except ValueError as e:
             return {"error": str(e)}
@@ -150,6 +159,102 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
                 "created_at": str(t.created_at),
             }
             for t in tasks
+        ]
+
+    # --- Workflow tools ---
+
+    @mcp.tool()
+    def create_workflow(prompt: str) -> dict:
+        """Create a new workflow record for brain orchestration."""
+        from .brain import BRAIN_AGENT_ID
+
+        workflow = Workflow(prompt=prompt, brain_agent_id=BRAIN_AGENT_ID)
+        manager.db.save_workflow(workflow)
+        return {
+            "workflow_id": workflow.id,
+            "status": workflow.status.value,
+            "prompt": workflow.prompt,
+        }
+
+    @mcp.tool()
+    def workflow_status(workflow_id: str) -> dict:
+        """Get workflow status and its subtask statuses."""
+        workflow = manager.db.get_workflow(workflow_id)
+        if workflow is None:
+            return {"error": f"Workflow {workflow_id} not found"}
+        subtasks = []
+        for tid in workflow.subtask_ids:
+            task = manager.get_task(tid)
+            if task:
+                subtasks.append({
+                    "id": task.id,
+                    "agent_id": task.agent_id,
+                    "status": task.status,
+                    "prompt": task.prompt[:100],
+                    "result": task.result[:200] if task.result else None,
+                    "error": task.error,
+                })
+        return {
+            "id": workflow.id,
+            "prompt": workflow.prompt,
+            "plan": workflow.plan,
+            "status": workflow.status.value,
+            "brain_agent_id": workflow.brain_agent_id,
+            "brain_task_id": workflow.brain_task_id,
+            "subtasks": subtasks,
+            "result": workflow.result,
+            "error": workflow.error,
+            "created_at": str(workflow.created_at),
+            "completed_at": str(workflow.completed_at) if workflow.completed_at else None,
+        }
+
+    @mcp.tool()
+    def update_workflow(
+        workflow_id: str,
+        status: str | None = None,
+        plan: str | None = None,
+        result: str | None = None,
+        error: str | None = None,
+        add_subtask_id: str | None = None,
+        brain_task_id: str | None = None,
+    ) -> dict:
+        """Update a workflow's state. Use add_subtask_id to append a subtask."""
+        from .models import WorkflowStatus
+
+        workflow = manager.db.get_workflow(workflow_id)
+        if workflow is None:
+            return {"error": f"Workflow {workflow_id} not found"}
+        if status:
+            workflow.status = WorkflowStatus(status)
+        if plan is not None:
+            workflow.plan = plan
+        if result is not None:
+            workflow.result = result
+        if error is not None:
+            workflow.error = error
+        if brain_task_id is not None:
+            workflow.brain_task_id = brain_task_id
+        if add_subtask_id:
+            workflow.subtask_ids.append(add_subtask_id)
+        if status in ("completed", "failed"):
+            from datetime import datetime, timezone
+            workflow.completed_at = datetime.now(timezone.utc)
+        manager.db.save_workflow(workflow)
+        return {"id": workflow.id, "status": workflow.status.value}
+
+    @mcp.tool()
+    def list_workflows() -> list[dict]:
+        """List all workflows."""
+        workflows = manager.db.list_workflows()
+        return [
+            {
+                "id": w.id,
+                "prompt": w.prompt[:100],
+                "status": w.status.value,
+                "subtask_count": len(w.subtask_ids),
+                "created_at": str(w.created_at),
+            }
+            for w in workflows
         ]
 
     return mcp

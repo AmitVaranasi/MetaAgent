@@ -1,5 +1,6 @@
 """Predefined agent configurations."""
 
+from ..brain import get_brain_config
 from ..models import AgentConfig
 
 ECHO_AGENT = AgentConfig(
@@ -29,4 +30,6 @@ REVIEWER_AGENT = AgentConfig(
     model="claude-sonnet-4-5-20250929",
 )
 
-ALL_EXAMPLES = [ECHO_AGENT, CODER_AGENT, REVIEWER_AGENT]
+BRAIN_AGENT = get_brain_config(["meta-agent", "mcp-server"])
+
+ALL_EXAMPLES = [ECHO_AGENT, CODER_AGENT, REVIEWER_AGENT, BRAIN_AGENT]
