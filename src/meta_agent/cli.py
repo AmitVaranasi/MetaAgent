@@ -243,7 +243,7 @@ def brain(ctx: click.Context, prompt: str, wait: bool) -> None:
         if t.status in ("completed", "failed"):
             wf = mgr.db.get_workflow(workflow.id)
             if t.status == "completed":
-                console.print(f"[green]Workflow completed[/green]")
+                console.print("[green]Workflow completed[/green]")
                 if t.result:
                     console.print(t.result)
             else:
@@ -307,17 +307,161 @@ def workflow(ctx: click.Context, workflow_id: str | None) -> None:
 
 
 @main.command()
-@click.option("--port", default=5555, help="Dashboard port")
-@click.option("--host", default="127.0.0.1", help="Dashboard host")
 @click.pass_context
-def dashboard(ctx: click.Context, port: int, host: str) -> None:
-    """Start the web dashboard."""
-    from .dashboard.app import create_app
+def chat(ctx: click.Context) -> None:
+    """Interactive chat with the Brain agent."""
+    import time
 
-    cfg = Config.get(Path(ctx.obj["data_dir"]) if ctx.obj["data_dir"] else None)
-    db = Database(cfg.db_path)
-    mgr = AgentManager(db, cfg.log_dir)
-    mgr.start()
-    app = create_app(mgr)
-    console.print(f"[green]Dashboard running at http://{host}:{port}[/green]")
-    app.run(host=host, port=port, debug=False)
+    from .brain import BRAIN_AGENT_ID, get_brain_config
+    from .chat_ui import get_user_input, print_progress, print_summary, print_welcome
+    from .models import Workflow
+
+    mgr = _make_manager(ctx.obj["data_dir"])
+
+    # Ensure brain agent exists
+    if mgr.get_agent(BRAIN_AGENT_ID) is None:
+        brain_config = get_brain_config(["meta-agent", "mcp-server"])
+        mgr.register_agent(brain_config)
+
+    print_welcome()
+
+    while True:
+        user_input = get_user_input()
+        if user_input is None:
+            console.print("\nGoodbye!")
+            break
+        user_input = user_input.strip()
+        if not user_input:
+            continue
+        if user_input.lower() in ("exit", "quit"):
+            console.print("Goodbye!")
+            break
+
+        # Create workflow
+        wf = Workflow(prompt=user_input, brain_agent_id=BRAIN_AGENT_ID)
+        mgr.db.save_workflow(wf)
+
+        console.print()
+        console.print("  [dim]Brain is thinking...[/dim]")
+
+        # Progress callback that fires events to the terminal
+        def on_progress(event: dict) -> None:
+            print_progress(event)
+
+        brain_prompt = (
+            f"Workflow ID: {wf.id}\n\n"
+            f"User Request: {user_input}\n\n"
+            "Please analyze this task, create a workflow plan, decompose into subtasks "
+            "if needed, and execute. Use the workflow tools to track progress.\n\n"
+            "IMPORTANT: Update the workflow status frequently so progress can be tracked. "
+            "When done, update the workflow status to 'completed' and set a clear result summary."
+        )
+
+        try:
+            task = mgr.submit_task(
+                BRAIN_AGENT_ID,
+                brain_prompt,
+                workflow_id=wf.id,
+                on_progress=on_progress,
+            )
+        except ValueError as e:
+            console.print(f"  [red]{e}[/red]")
+            continue
+
+        print_progress({"kind": "workflow_created", "workflow_id": wf.id})
+
+        # Poll for progress until the brain task completes
+        last_wf_status = wf.status.value
+        last_subtask_count = 0
+        reported_subtasks: set[str] = set()
+        reported_done: set[str] = set()
+
+        while True:
+            time.sleep(2)
+
+            # Check brain task status
+            t = mgr.get_task(task.id)
+            if t is None:
+                break
+
+            # Poll workflow for progress updates
+            current_wf = mgr.db.get_workflow(wf.id)
+            if current_wf:
+                # Report workflow status changes
+                if current_wf.status.value != last_wf_status:
+                    last_wf_status = current_wf.status.value
+                    if last_wf_status == "executing":
+                        if current_wf.plan:
+                            total = len(current_wf.subtask_ids) if current_wf.subtask_ids else 0
+                            print_progress({
+                                "kind": "plan_ready",
+                                "plan": current_wf.plan,
+                                "total": total,
+                            })
+                        else:
+                            print_progress({"kind": "planning"})
+                    elif last_wf_status == "assembling":
+                        print_progress({"kind": "assembling"})
+
+                # Report new subtasks
+                if current_wf.subtask_ids:
+                    total = len(current_wf.subtask_ids)
+                    if total > last_subtask_count:
+                        # Plan may have been updated — re-report if we haven't yet
+                        if last_subtask_count == 0 and current_wf.plan and last_wf_status != "executing":
+                            print_progress({
+                                "kind": "plan_ready",
+                                "plan": current_wf.plan,
+                                "total": total,
+                            })
+                        last_subtask_count = total
+
+                    for idx, tid in enumerate(current_wf.subtask_ids, 1):
+                        st = mgr.get_task(tid)
+                        if st is None:
+                            continue
+                        if tid not in reported_subtasks and st.status == "running":
+                            reported_subtasks.add(tid)
+                            print_progress({
+                                "kind": "subtask_running",
+                                "index": idx,
+                                "total": total,
+                                "description": st.prompt[:60],
+                                "agent_id": st.agent_id,
+                            })
+                        if tid not in reported_done and st.status == "completed":
+                            reported_done.add(tid)
+                            if tid not in reported_subtasks:
+                                reported_subtasks.add(tid)
+                            print_progress({
+                                "kind": "subtask_done",
+                                "index": idx,
+                                "total": total,
+                            })
+                        if tid not in reported_done and st.status == "failed":
+                            reported_done.add(tid)
+                            print_progress({
+                                "kind": "subtask_failed",
+                                "index": idx,
+                                "total": total,
+                                "error": st.error or "unknown",
+                            })
+
+            # Check if brain task finished
+            if t.status in ("completed", "failed"):
+                final_wf = mgr.db.get_workflow(wf.id)
+                if final_wf:
+                    # Gather subtask objects for the summary
+                    subtask_objs = []
+                    for tid in (final_wf.subtask_ids or []):
+                        st = mgr.get_task(tid)
+                        if st:
+                            subtask_objs.append(st)
+                    print_summary(final_wf, subtask_objs)
+                elif t.status == "completed":
+                    console.print(f"\n  [green]Done.[/green]")
+                    if t.result:
+                        console.print(f"  {t.result[:500]}")
+                else:
+                    console.print(f"\n  [red]Failed: {t.error}[/red]")
+                break

@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .agent_runner import AgentRunner
 from .db import Database
 from .external_runner import ExternalModelRunner
 from .models import AgentConfig, AgentState, AgentStatus, Task
+
+ProgressCallback = Callable[[dict[str, Any]], None] | None
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +82,7 @@ class AgentManager:
         prompt: str,
         workflow_id: str | None = None,
         parent_task_id: str | None = None,
+        on_progress: ProgressCallback = None,
     ) -> Task:
         """Submit a task to an agent. Runs via SDK in the background event loop."""
         with self._lock:
@@ -103,13 +108,26 @@ class AgentManager:
 
         if self._loop:
             asyncio.run_coroutine_threadsafe(
-                self._execute_task(agent_id, runner, task),
+                self._execute_task(agent_id, runner, task, on_progress=on_progress),
                 self._loop,
             )
         return task
 
+    def _fire_progress(self, callback: ProgressCallback, event: dict[str, Any]) -> None:
+        """Safely invoke the progress callback."""
+        if callback is None:
+            return
+        try:
+            callback(event)
+        except Exception:
+            logger.debug("Progress callback error", exc_info=True)
+
     async def _execute_task(
-        self, agent_id: str, runner: AgentRunner, task: Task
+        self,
+        agent_id: str,
+        runner: AgentRunner,
+        task: Task,
+        on_progress: ProgressCallback = None,
     ) -> None:
         """Execute a task and update state on completion."""
         log_path = self.log_dir / f"{agent_id}.log"
@@ -118,6 +136,8 @@ class AgentManager:
         def on_message(msg: object) -> None:
             with open(log_path, "a") as f:
                 f.write(f"{msg}\n")
+
+        self._fire_progress(on_progress, {"kind": "status_change", "status": "running", "task_id": task.id})
 
         try:
             state = self._agents[agent_id]
@@ -133,6 +153,7 @@ class AgentManager:
                 state = self._agents[agent_id]
                 state.status = AgentStatus.IDLE
                 state.current_task_id = None
+            self._fire_progress(on_progress, {"kind": "task_completed", "task_id": task.id})
         except Exception as e:
             logger.exception("Task %s failed for agent %s", task.id, agent_id)
             task.status = "failed"
@@ -142,6 +163,7 @@ class AgentManager:
                 state = self._agents[agent_id]
                 state.status = AgentStatus.ERROR
                 state.error = str(e)
+            self._fire_progress(on_progress, {"kind": "task_failed", "task_id": task.id, "error": str(e)})
             if (
                 state.config.auto_restart
                 and state.restart_count < state.config.max_restarts

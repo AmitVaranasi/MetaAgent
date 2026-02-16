@@ -1,27 +1,29 @@
 # Meta-Agent
 
-A Python-based meta-agent system that orchestrates multiple Claude-powered agents locally using the [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-agent-sdk). It exposes an MCP server for Claude Code integration, a CLI, and a web dashboard.
+A Python-based meta-agent system that orchestrates multiple Claude-powered agents locally using the [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-agent-sdk). It features an interactive chat CLI powered by an Opus-class Brain agent, an MCP server for Claude Code integration, and a full management CLI.
 
 ```
- Claude Code ──MCP(stdio)──> Meta-Agent Process
-                              ├── AgentManager (orchestrates SDK agents)
-                              ├── SQLite DB (WAL mode)
-                              ├── CLI (Click + Rich)
-                              └── Dashboard (Flask + htmx, polling)
-                                    │
-                        ┌───────────┼───────────┐
-                        v           v           v
-                    Agent 1     Agent 2     Agent N
-                   (SDK query) (SDK query) (SDK query)
-                   own session own session own session
+ You ──(chat)──> meta-agent chat
+                   ├── Brain Agent (Opus) — orchestrates everything
+                   ├── AgentManager (lifecycle, task scheduling)
+                   ├── SQLite DB (WAL mode)
+                   └── CLI (Click + Rich)
+                         │
+             ┌───────────┼───────────┐
+             v           v           v
+         Agent 1     Agent 2     Agent N
+        (SDK query) (SDK query) (SDK query)
+        own session own session own session
 ```
 
 ## Features
 
+- **Interactive Chat** — Conversational interface with the Brain agent; type a task, watch live progress, get a rich summary
+- **Brain Orchestration** — Opus-powered Brain agent that decomposes complex tasks, spawns specialized agents, and assembles results
 - **Agent Management** — Create, start, stop, and delete agents with custom system prompts, tool permissions, and model selection
+- **Live Progress** — Real-time status updates as the Brain plans, delegates, and completes subtasks
 - **Task Execution** — Submit prompts to agents; tasks run asynchronously via the Claude Agent SDK
 - **MCP Server** — 10 tools exposed over stdio for integration with Claude Code
-- **Web Dashboard** — Real-time agent monitoring with status badges, task queue, and log viewer (auto-refreshes every 2s)
 - **CLI** — Full command-line interface for all operations
 - **Session Tracking** — SDK sessions with resume support
 - **Auto-Restart** — Configurable automatic recovery from agent errors
@@ -35,8 +37,11 @@ A Python-based meta-agent system that orchestrates multiple Claude-powered agent
 ## Installation
 
 ```bash
-# Clone and install
-cd meta-agents
+# Clone the repository
+git clone https://github.com/AmitVaranasi/MetaAgent.git
+cd MetaAgent/meta-agents
+
+# Install in development mode
 pip install -e ".[dev]"
 ```
 
@@ -50,24 +55,109 @@ meta-agent init
 
 This creates the `data/` directory with the SQLite database and log folder.
 
-### 2. Create Agents
+### 2. Start a Chat Session
+
+This is the primary way to use Meta-Agent. The Brain agent handles everything — planning, agent creation, task delegation, and assembly.
 
 ```bash
-# Simple chat agent (no tools)
-meta-agent create --name "Echo" --system-prompt "You are helpful. Respond concisely." --tools ""
-
-# Coding agent with file access
-meta-agent create --name "Coder" \
-  --system-prompt "You are an expert programmer. Read files, write code, run tests." \
-  --tools "Read,Write,Edit,Bash,Glob,Grep"
-
-# Read-only code reviewer
-meta-agent create --name "Reviewer" \
-  --system-prompt "You are a senior code reviewer. Analyze code for bugs and security issues." \
-  --tools "Read,Glob,Grep"
+meta-agent chat
 ```
 
-Options:
+Example session:
+
+```
+  Meta-Agent Brain
+  Type your task and press Enter. Type 'exit' to quit.
+
+You > Build a Python CLI that converts CSV to JSON
+
+  Brain is thinking...
+  ✓ Workflow created (id: a1b2c3)
+  ◐ Planning task decomposition...
+  ✓ Plan: 3 subtasks
+    1. Create CSV parser module
+    2. Create JSON converter
+    3. Add CLI entry point
+  ◐ Running subtask 1/3: Create CSV parser module (agent: coder-abc)
+  ✓ Subtask 1/3 completed
+  ◐ Running subtask 2/3: Create JSON converter (agent: coder-def)
+  ✓ Subtask 2/3 completed
+  ◐ Running subtask 3/3: Add CLI entry point (agent: coder-ghi)
+  ✓ Subtask 3/3 completed
+  ◐ Assembling final result...
+
+  ╭─ Task Complete ──────────────────────────────────╮
+  │                                                   │
+  │  Plan:                                            │
+  │  Split into 3 subtasks: parser, converter, CLI    │
+  │                                                   │
+  │  What happened:                                   │
+  │  1. ✓ Created csv_parser.py with streaming reader │
+  │  2. ✓ Created json_converter.py with formatting   │
+  │  3. ✓ Created main.py with click CLI              │
+  │                                                   │
+  │  Result:                                          │
+  │  Built a CLI tool at ./csv2json that converts...  │
+  │                                                   │
+  │  Duration: 2m 34s | Agents used: 3 | Subtasks: 3 │
+  ╰──────────────────────────────────────────────────╯
+
+You > exit
+Goodbye!
+```
+
+To exit the chat: type `exit`, `quit`, or press `Ctrl+C`.
+
+### 3. Direct Brain Command (Non-Interactive)
+
+For one-off tasks without entering the chat REPL:
+
+```bash
+# Fire and forget
+meta-agent brain "Write a Python script that fetches weather data"
+
+# Wait for completion
+meta-agent brain --wait "Write a Python script that fetches weather data"
+```
+
+### 4. Manual Agent Management
+
+You can also create and manage agents directly:
+
+```bash
+# Create agents
+meta-agent create --name "Coder" \
+  --system-prompt "You are an expert programmer." \
+  --tools "Read,Write,Edit,Bash,Glob,Grep"
+
+meta-agent create --name "Reviewer" \
+  --system-prompt "You are a senior code reviewer." \
+  --tools "Read,Glob,Grep"
+
+# List agents
+meta-agent list
+
+# Submit a task
+meta-agent submit coder "Write a prime number checker"
+
+# Check status
+meta-agent status
+meta-agent status coder
+
+# View logs
+meta-agent logs coder
+meta-agent logs coder -n 200
+
+# Check workflows
+meta-agent workflow
+meta-agent workflow <workflow-id>
+
+# Delete an agent
+meta-agent delete coder
+```
+
+#### Agent Create Options
+
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--name` | Agent display name | (required) |
@@ -77,73 +167,6 @@ Options:
 | `--id` | Custom agent ID | auto-generated |
 | `--description` | Agent description | empty |
 | `--cwd` | Working directory for the agent | current directory |
-
-### 3. List Agents
-
-```bash
-meta-agent list
-```
-
-```
-                               Agents
-┏━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
-┃ ID       ┃ Name     ┃ Status  ┃ Model                      ┃ Description ┃
-┡━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
-│ echo     │ Echo     │ stopped │ claude-sonnet-4-5-20250929 │             │
-│ coder    │ Coder    │ idle    │ claude-sonnet-4-5-20250929 │             │
-│ reviewer │ Reviewer │ stopped │ claude-sonnet-4-5-20250929 │             │
-└──────────┴──────────┴─────────┴────────────────────────────┴─────────────┘
-```
-
-### 4. Submit Tasks
-
-```bash
-meta-agent submit echo "What is 2+2?"
-meta-agent submit coder "Write a Python function that checks if a number is prime"
-```
-
-### 5. Check Status
-
-```bash
-# All tasks
-meta-agent status
-
-# Specific agent
-meta-agent status echo
-```
-
-### 6. View Logs
-
-```bash
-# Last 50 lines
-meta-agent logs echo
-
-# Last 200 lines
-meta-agent logs echo -n 200
-```
-
-### 7. Delete an Agent
-
-```bash
-meta-agent delete echo
-```
-
-## Web Dashboard
-
-Start the dashboard:
-
-```bash
-meta-agent dashboard --port 5555
-```
-
-Open http://localhost:5555 in your browser.
-
-The dashboard provides:
-- **Create Agent form** — name, model selector, tools, and system prompt
-- **Agent cards** — live status badges (stopped/idle/running/error), Start/Stop/Delete/Logs buttons
-- **Submit Task form** — pick an agent and enter a prompt
-- **Tasks table** — task ID, agent, status badge, prompt, and timestamp
-- **Auto-refresh** — polls every 2 seconds for live updates
 
 ## MCP Server (Claude Code Integration)
 
@@ -191,15 +214,17 @@ Options:
   --help           Show this message and exit.
 
 Commands:
-  init        Initialize the data directory and database
-  list        List all registered agents
+  brain       Submit a task to the Brain agent for automatic orchestration
+  chat        Interactive chat with the Brain agent
   create      Create and register a new agent
   delete      Delete an agent by ID
-  submit      Submit a task to an agent
-  status      Show agent or task status
+  init        Initialize the data directory and database
+  list        List all registered agents
   logs        View agent logs
   mcp-server  Start the MCP server (stdio transport)
-  dashboard   Start the web dashboard
+  status      Show agent or task status
+  submit      Submit a task to an agent
+  workflow    List workflows or show workflow detail with subtask tree
 ```
 
 ## Agent Configuration
@@ -265,17 +290,16 @@ meta-agents/
 ├── src/meta_agent/
 │   ├── __init__.py
 │   ├── __main__.py                      # python -m meta_agent
-│   ├── models.py                        # Pydantic models: AgentConfig, AgentState, Task
+│   ├── models.py                        # Pydantic models: AgentConfig, AgentState, Task, Workflow
 │   ├── config.py                        # Config singleton (db_path, log_dir)
 │   ├── db.py                            # SQLite WAL database, CRUD operations
 │   ├── agent_runner.py                  # Wraps claude_agent_sdk.query()
-│   ├── agent_manager.py                 # Agent lifecycle, task scheduling, logs
+│   ├── agent_manager.py                 # Agent lifecycle, task scheduling, progress callbacks
 │   ├── mcp_server.py                    # FastMCP server with 10 tools
-│   ├── cli.py                           # Click CLI commands
-│   ├── dashboard/
-│   │   ├── app.py                       # Flask app factory
-│   │   ├── routes.py                    # JSON API + page routes
-│   │   └── templates/index.html         # htmx dashboard
+│   ├── cli.py                           # Click CLI commands (chat, brain, create, etc.)
+│   ├── chat_ui.py                       # Rich chat UI helpers (progress, summary panels)
+│   ├── brain.py                         # Brain agent config and system prompt
+│   ├── external_runner.py               # External model runner (Gemini, etc.)
 │   └── agent_configs/
 │       └── examples.py                  # Predefined agent configs
 ├── data/                                # Runtime data (gitignored)
@@ -287,6 +311,8 @@ meta-agents/
     ├── test_db.py                       # Database CRUD operations
     ├── test_agent_runner.py             # SDK query mocking
     ├── test_agent_manager.py            # Lifecycle and task scheduling
+    ├── test_brain.py                    # Brain config tests
+    ├── test_external_runner.py          # External model runner tests
     └── test_mcp_server.py              # MCP tool integration
 ```
 
@@ -296,7 +322,7 @@ meta-agents/
 - SDK `query()` calls are scheduled via `asyncio.run_coroutine_threadsafe()`
 - `threading.Lock` protects in-memory agent state
 - SQLite WAL mode with `busy_timeout=5000` for database concurrency
-- Flask and CLI are synchronous — they interact with the manager through thread-safe methods
+- CLI is synchronous — it interacts with the manager through thread-safe methods
 
 ## Development
 
@@ -324,10 +350,9 @@ meta-agent init
 |---------|---------|
 | `claude-agent-sdk` | Claude Agent SDK for running agents |
 | `click` | CLI framework |
-| `flask` | Web dashboard |
 | `pydantic` | Data models and validation |
 | `mcp` | MCP server (FastMCP) |
-| `rich` | Terminal formatting and tables |
+| `rich` | Terminal formatting, tables, and chat UI |
 
 ## License
 

@@ -64,6 +64,26 @@ For tasks involving git operations:
 - Push and create PRs using `gh pr create`
 - Example flow: clone → analyze → implement → test → commit → push → PR
 
+## Progress Reporting
+
+You MUST update the workflow frequently so that external consumers can track progress:
+
+1. **Immediately** after analyzing the task, call `update_workflow` to set:
+   - `status` to "planning"
+   - `plan` to a brief description of your decomposition strategy
+
+2. **After planning**, call `update_workflow` to set:
+   - `status` to "executing"
+   - `plan` to a numbered list of subtasks (e.g. "1. Create parser module\n2. Create converter\n3. Add CLI")
+
+3. **As each subtask completes**, call `update_workflow` to append the subtask ID and update the plan with progress notes.
+
+4. **Before assembling**, call `update_workflow` with `status` set to "assembling".
+
+5. **When done**, call `update_workflow` with:
+   - `status` to "completed"
+   - `result` to a clear, human-readable summary of what was accomplished and the final output
+
 ## Important Rules
 
 - Always create a workflow record first with `create_workflow`
@@ -73,6 +93,7 @@ For tasks involving git operations:
 - If any subtask fails, update the workflow status to "failed" with the error
 - Be thorough but efficient — don't over-decompose simple tasks
 - Poll task_status with reasonable intervals (don't spam)
+- Write a clear, detailed final summary in the workflow result field when completed
 """
 
 
