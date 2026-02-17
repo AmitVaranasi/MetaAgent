@@ -207,6 +207,91 @@ def api_create_workflow():
         return jsonify({"error": str(e)}), 400
 
 
+@bp.route("/kanban")
+def kanban_board():
+    return render_template("kanban.html")
+
+
+@bp.route("/api/kanban")
+def api_kanban():
+    """Return tasks grouped by lifecycle stage with agent info for Kanban display."""
+    workflow_id = request.args.get("workflow_id")
+    mgr = _mgr()
+    tasks = mgr.list_tasks()
+    agents_list = mgr.list_agents()
+    agents_map = {a.config.id: a for a in agents_list}
+
+    # Optionally filter by workflow
+    if workflow_id:
+        tasks = [t for t in tasks if t.workflow_id == workflow_id]
+
+    columns = {
+        "pending": {"label": "Pending", "icon": "⏳", "tasks": []},
+        "running": {"label": "Running", "icon": "🔄", "tasks": []},
+        "completed": {"label": "Completed", "icon": "✅", "tasks": []},
+        "failed": {"label": "Failed", "icon": "❌", "tasks": []},
+    }
+
+    for t in tasks:
+        agent = agents_map.get(t.agent_id)
+        agent_info = {
+            "id": agent.config.id,
+            "name": agent.config.name,
+            "model": agent.config.model,
+            "status": agent.status.value,
+        } if agent else {"id": t.agent_id, "name": "Unknown", "model": "N/A", "status": "unknown"}
+
+        task_data = {
+            "id": t.id,
+            "agent": agent_info,
+            "status": t.status,
+            "prompt": t.prompt[:150],
+            "full_prompt": t.prompt,
+            "result": t.result[:300] if t.result else None,
+            "error": t.error,
+            "created_at": str(t.created_at),
+            "completed_at": str(t.completed_at) if t.completed_at else None,
+            "workflow_id": t.workflow_id,
+            "parent_task_id": t.parent_task_id,
+        }
+
+        col = t.status if t.status in columns else "pending"
+        columns[col]["tasks"].append(task_data)
+
+    # Sort: running first by created_at, pending by created_at, completed/failed by completed_at desc
+    for key in columns:
+        columns[key]["tasks"].sort(
+            key=lambda x: x.get("completed_at") or x.get("created_at") or "",
+            reverse=(key in ("completed", "failed")),
+        )
+
+    # Also gather workflow info if a workflow_id is specified
+    workflow_info = None
+    if workflow_id:
+        wf = mgr.db.get_workflow(workflow_id)
+        if wf:
+            workflow_info = {
+                "id": wf.id,
+                "prompt": wf.prompt,
+                "plan": wf.plan,
+                "status": wf.status.value,
+                "result": wf.result,
+                "error": wf.error,
+            }
+
+    return jsonify({
+        "columns": columns,
+        "workflow": workflow_info,
+        "total_tasks": len(tasks),
+        "summary": {
+            "pending": len(columns["pending"]["tasks"]),
+            "running": len(columns["running"]["tasks"]),
+            "completed": len(columns["completed"]["tasks"]),
+            "failed": len(columns["failed"]["tasks"]),
+        },
+    })
+
+
 @bp.route("/api/workflows/<workflow_id>")
 def api_get_workflow(workflow_id: str):
     workflow = _mgr().db.get_workflow(workflow_id)

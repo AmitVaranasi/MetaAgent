@@ -40,7 +40,13 @@
     </style>
 </head>
 <body>
-    <h1>Meta-Agent Dashboard</h1>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:20px;">
+        <h1>Meta-Agent Dashboard</h1>
+        <a href="/kanban" style="color:#58a6ff; text-decoration:none; padding:8px 16px; border:1px solid #30363d; border-radius:6px; font-size:0.9em; transition:all 0.2s;"
+           onmouseover="this.style.background='#21262d'" onmouseout="this.style.background='transparent'">
+            📋 Kanban Board →
+        </a>
+    </div>
 
     <!-- Brain Workflow Section -->
     <div class="section">
@@ -251,7 +257,10 @@
                     <td>${w.prompt}</td>
                     <td>${w.subtask_count}</td>
                     <td>${w.created_at ? w.created_at.substring(0,19) : ''}</td>
-                    <td><button class="btn" onclick="showWorkflow('${w.id}')">Detail</button></td>
+                    <td>
+                        <button class="btn" onclick="showWorkflow('${w.id}')">Detail</button>
+                        <a class="btn" href="/kanban?workflow_id=${w.id}" style="text-decoration:none; display:inline-block;">Kanban</a>
+                    </td>
                 </tr>
             `).join('');
         }

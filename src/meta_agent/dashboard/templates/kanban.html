@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kanban Board — Meta-Agent</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1117;
+            color: #e1e4e8;
+            min-height: 100vh;
+        }
+
+        /* --- Top Bar --- */
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+        }
+        .topbar h1 { color: #58a6ff; font-size: 1.3em; }
+        .topbar a {
+            color: #8b949e;
+            text-decoration: none;
+            font-size: 0.9em;
+            padding: 6px 12px;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .topbar a:hover { background: #21262d; color: #c9d1d9; }
+        .topbar-left { display: flex; align-items: center; gap: 16px; }
+        .topbar-right { display: flex; align-items: center; gap: 12px; }
+
+        /* --- Summary Bar --- */
+        .summary-bar {
+            display: flex;
+            gap: 16px;
+            padding: 16px 24px;
+            background: #161b22;
+            border-bottom: 1px solid #21262d;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .summary-stat {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.9em;
+        }
+        .summary-stat .num {
+            font-weight: 700;
+            font-size: 1.3em;
+        }
+        .summary-stat .label { color: #8b949e; }
+        .stat-pending .num { color: #d29922; }
+        .stat-running .num { color: #58a6ff; }
+        .stat-completed .num { color: #3fb950; }
+        .stat-failed .num { color: #f85149; }
+        .summary-divider {
+            width: 1px;
+            height: 30px;
+            background: #30363d;
+        }
+
+        /* --- Workflow Filter --- */
+        .filter-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 24px;
+            background: #0f1117;
+        }
+        .filter-bar label { color: #8b949e; font-size: 0.85em; }
+        .filter-bar select {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            padding: 6px 10px;
+            font-size: 0.9em;
+            min-width: 200px;
+        }
+        .workflow-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 600;
+        }
+
+        /* --- Kanban Layout --- */
+        .kanban-container {
+            display: flex;
+            gap: 16px;
+            padding: 20px 24px;
+            overflow-x: auto;
+            min-height: calc(100vh - 180px);
+            align-items: flex-start;
+        }
+
+        /* --- Column --- */
+        .kanban-column {
+            flex: 1;
+            min-width: 300px;
+            max-width: 400px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+        }
+        .column-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px;
+            border-bottom: 1px solid #30363d;
+            border-radius: 10px 10px 0 0;
+        }
+        .column-header-left { display: flex; align-items: center; gap: 8px; }
+        .column-icon { font-size: 1.2em; }
+        .column-title { font-weight: 600; font-size: 0.95em; }
+        .column-count {
+            background: #21262d;
+            color: #8b949e;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.8em;
+            font-weight: 600;
+        }
+        .column-pending .column-header { border-bottom-color: #d29922; }
+        .column-running .column-header { border-bottom-color: #58a6ff; }
+        .column-completed .column-header { border-bottom-color: #3fb950; }
+        .column-failed .column-header { border-bottom-color: #f85149; }
+
+        .column-body {
+            padding: 12px;
+            flex: 1;
+            overflow-y: auto;
+            max-height: calc(100vh - 300px);
+        }
+
+        /* --- Task Card --- */
+        .task-card {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .task-card:hover {
+            border-color: #58a6ff;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .task-card:last-child { margin-bottom: 0; }
+
+        .task-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .task-id {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.8em;
+            color: #58a6ff;
+            background: #1a3a5c;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .task-time {
+            font-size: 0.75em;
+            color: #484f58;
+        }
+
+        .task-prompt {
+            font-size: 0.88em;
+            color: #c9d1d9;
+            line-height: 1.4;
+            margin-bottom: 10px;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        /* --- Agent Badge --- */
+        .agent-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 6px 10px;
+        }
+        .agent-avatar {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75em;
+            font-weight: 700;
+            color: white;
+        }
+        .agent-info { display: flex; flex-direction: column; }
+        .agent-name { font-size: 0.82em; font-weight: 600; color: #e1e4e8; }
+        .agent-model { font-size: 0.72em; color: #8b949e; }
+        .agent-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-left: auto;
+        }
+        .dot-running { background: #58a6ff; box-shadow: 0 0 6px #58a6ff; animation: pulse 1.5s infinite; }
+        .dot-idle { background: #3fb950; }
+        .dot-stopped { background: #484f58; }
+        .dot-error { background: #f85149; }
+        .dot-unknown { background: #484f58; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* --- Task Result / Error --- */
+        .task-result {
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: #1b4332;
+            border: 1px solid #2ea043;
+            border-radius: 6px;
+            font-size: 0.8em;
+            color: #3fb950;
+            display: none;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+        .task-error {
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: #3d1117;
+            border: 1px solid #f85149;
+            border-radius: 6px;
+            font-size: 0.8em;
+            color: #f85149;
+            display: none;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        .task-card.expanded .task-result,
+        .task-card.expanded .task-error {
+            display: block;
+        }
+        .task-card.expanded .task-prompt {
+            -webkit-line-clamp: unset;
+        }
+
+        /* --- Workflow Info Banner --- */
+        .workflow-banner {
+            margin: 0 24px;
+            padding: 12px 16px;
+            background: #1a3a5c;
+            border: 1px solid #58a6ff;
+            border-radius: 8px;
+            display: none;
+        }
+        .workflow-banner.visible { display: block; }
+        .workflow-banner h3 { color: #58a6ff; font-size: 0.95em; margin-bottom: 4px; }
+        .workflow-banner .wf-plan {
+            color: #8b949e;
+            font-size: 0.85em;
+            white-space: pre-wrap;
+            margin-top: 6px;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+
+        /* --- Lifecycle Timeline (inside expanded card) --- */
+        .lifecycle-timeline {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #21262d;
+        }
+        .lifecycle-step {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.75em;
+            color: #8b949e;
+        }
+        .lifecycle-step.active { color: #58a6ff; font-weight: 600; }
+        .lifecycle-step.done { color: #3fb950; }
+        .lifecycle-step.error { color: #f85149; }
+        .lifecycle-arrow { color: #30363d; font-size: 0.7em; }
+
+        /* --- Empty State --- */
+        .empty-column {
+            color: #484f58;
+            text-align: center;
+            padding: 30px 10px;
+            font-size: 0.85em;
+        }
+        .empty-column .empty-icon { font-size: 2em; margin-bottom: 8px; }
+
+        /* --- Auto-refresh indicator --- */
+        .refresh-indicator {
+            font-size: 0.75em;
+            color: #484f58;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .refresh-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #3fb950;
+            animation: pulse 2s infinite;
+        }
+
+        /* --- Scrollbar --- */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+    </style>
+</head>
+<body>
+    <!-- Top Bar -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <h1>📋 Kanban Board</h1>
+            <div class="refresh-indicator">
+                <div class="refresh-dot"></div>
+                Live
+            </div>
+        </div>
+        <div class="topbar-right">
+            <a href="/">← Dashboard</a>
+        </div>
+    </div>
+
+    <!-- Summary Bar -->
+    <div class="summary-bar">
+        <div class="summary-stat stat-pending">
+            <span class="num" id="sumPending">0</span>
+            <span class="label">Pending</span>
+        </div>
+        <div class="summary-divider"></div>
+        <div class="summary-stat stat-running">
+            <span class="num" id="sumRunning">0</span>
+            <span class="label">Running</span>
+        </div>
+        <div class="summary-divider"></div>
+        <div class="summary-stat stat-completed">
+            <span class="num" id="sumCompleted">0</span>
+            <span class="label">Completed</span>
+        </div>
+        <div class="summary-divider"></div>
+        <div class="summary-stat stat-failed">
+            <span class="num" id="sumFailed">0</span>
+            <span class="label">Failed</span>
+        </div>
+        <div class="summary-divider"></div>
+        <div class="summary-stat">
+            <span class="num" id="sumTotal" style="color:#c9d1d9">0</span>
+            <span class="label">Total</span>
+        </div>
+    </div>
+
+    <!-- Workflow Filter -->
+    <div class="filter-bar">
+        <label>Filter by Workflow:</label>
+        <select id="workflowFilter">
+            <option value="">All Tasks</option>
+        </select>
+    </div>
+
+    <!-- Workflow Info Banner -->
+    <div class="workflow-banner" id="workflowBanner">
+        <h3 id="wfBannerTitle"></h3>
+        <div>
+            <span class="workflow-badge" id="wfBannerStatus"></span>
+        </div>
+        <div class="wf-plan" id="wfBannerPlan"></div>
+    </div>
+
+    <!-- Kanban Columns -->
+    <div class="kanban-container">
+        <!-- Pending Column -->
+        <div class="kanban-column column-pending">
+            <div class="column-header">
+                <div class="column-header-left">
+                    <span class="column-icon">⏳</span>
+                    <span class="column-title">Pending</span>
+                </div>
+                <span class="column-count" id="countPending">0</span>
+            </div>
+            <div class="column-body" id="colPending"></div>
+        </div>
+
+        <!-- Running Column -->
+        <div class="kanban-column column-running">
+            <div class="column-header">
+                <div class="column-header-left">
+                    <span class="column-icon">🔄</span>
+                    <span class="column-title">Running</span>
+                </div>
+                <span class="column-count" id="countRunning">0</span>
+            </div>
+            <div class="column-body" id="colRunning"></div>
+        </div>
+
+        <!-- Completed Column -->
+        <div class="kanban-column column-completed">
+            <div class="column-header">
+                <div class="column-header-left">
+                    <span class="column-icon">✅</span>
+                    <span class="column-title">Completed</span>
+                </div>
+                <span class="column-count" id="countCompleted">0</span>
+            </div>
+            <div class="column-body" id="colCompleted"></div>
+        </div>
+
+        <!-- Failed Column -->
+        <div class="kanban-column column-failed">
+            <div class="column-header">
+                <div class="column-header-left">
+                    <span class="column-icon">❌</span>
+                    <span class="column-title">Failed</span>
+                </div>
+                <span class="column-count" id="countFailed">0</span>
+            </div>
+            <div class="column-body" id="colFailed"></div>
+        </div>
+    </div>
+
+    <script>
+        // --- Agent color generator (deterministic from ID) ---
+        function agentColor(id) {
+            const colors = [
+                '#6f42c1', '#0969da', '#cf222e', '#1a7f37',
+                '#bf8700', '#8250df', '#0550ae', '#953800',
+                '#1b7c83', '#7c3aed', '#2563eb', '#dc2626',
+            ];
+            let hash = 0;
+            for (let i = 0; i < id.length; i++) {
+                hash = ((hash << 5) - hash) + id.charCodeAt(i);
+                hash |= 0;
+            }
+            return colors[Math.abs(hash) % colors.length];
+        }
+
+        function agentInitials(name) {
+            return name.split(/[\s_-]+/).map(w => w[0]).join('').toUpperCase().substring(0, 2);
+        }
+
+        function timeAgo(dateStr) {
+            if (!dateStr || dateStr === 'None') return '';
+            const date = new Date(dateStr);
+            const now = new Date();
+            const seconds = Math.floor((now - date) / 1000);
+            if (seconds < 60) return seconds + 's ago';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+            if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+            return Math.floor(seconds / 86400) + 'd ago';
+        }
+
+        function lifecycleHTML(task) {
+            const steps = [
+                { label: 'Created', done: true },
+                { label: 'Pending', done: task.status !== 'pending', active: task.status === 'pending' },
+                { label: 'Running', done: task.status === 'completed' || task.status === 'failed', active: task.status === 'running' },
+                { label: task.status === 'failed' ? 'Failed' : 'Done',
+                  done: task.status === 'completed',
+                  active: false,
+                  error: task.status === 'failed' },
+            ];
+            return steps.map((s, i) => {
+                let cls = 'lifecycle-step';
+                if (s.error) cls += ' error';
+                else if (s.active) cls += ' active';
+                else if (s.done) cls += ' done';
+                const arrow = i < steps.length - 1 ? '<span class="lifecycle-arrow">→</span>' : '';
+                const icon = s.error ? '✗' : s.done ? '✓' : s.active ? '◐' : '○';
+                return `<span class="${cls}">${icon} ${s.label}</span>${arrow}`;
+            }).join('');
+        }
+
+        function renderTaskCard(task) {
+            const agentBg = agentColor(task.agent.id);
+            const initials = agentInitials(task.agent.name);
+            const dotClass = 'dot-' + task.agent.status;
+            const time = timeAgo(task.created_at);
+
+            return `
+                <div class="task-card" onclick="this.classList.toggle('expanded')">
+                    <div class="task-header">
+                        <span class="task-id">${task.id}</span>
+                        <span class="task-time">${time}</span>
+                    </div>
+                    <div class="task-prompt">${escapeHtml(task.prompt)}</div>
+                    <div class="agent-badge">
+                        <div class="agent-avatar" style="background:${agentBg}">${initials}</div>
+                        <div class="agent-info">
+                            <span class="agent-name">${escapeHtml(task.agent.name)}</span>
+                            <span class="agent-model">${task.agent.model}</span>
+                        </div>
+                        <div class="agent-status-dot ${dotClass}" title="Agent: ${task.agent.status}"></div>
+                    </div>
+                    ${task.result ? `<div class="task-result">${escapeHtml(task.result)}</div>` : ''}
+                    ${task.error ? `<div class="task-error">${escapeHtml(task.error)}</div>` : ''}
+                    <div class="lifecycle-timeline">${lifecycleHTML(task)}</div>
+                </div>
+            `;
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function renderEmptyState(status) {
+            const icons = { pending: '⏳', running: '🔄', completed: '✅', failed: '❌' };
+            const msgs = {
+                pending: 'No tasks waiting',
+                running: 'No tasks in progress',
+                completed: 'No completed tasks yet',
+                failed: 'No failed tasks',
+            };
+            return `<div class="empty-column"><div class="empty-icon">${icons[status]}</div>${msgs[status]}</div>`;
+        }
+
+        // --- Main fetch & render ---
+        let currentWorkflowId = '';
+
+        async function fetchKanban() {
+            const url = currentWorkflowId
+                ? '/api/kanban?workflow_id=' + encodeURIComponent(currentWorkflowId)
+                : '/api/kanban';
+            const res = await fetch(url);
+            const data = await res.json();
+
+            // Update summary
+            document.getElementById('sumPending').textContent = data.summary.pending;
+            document.getElementById('sumRunning').textContent = data.summary.running;
+            document.getElementById('sumCompleted').textContent = data.summary.completed;
+            document.getElementById('sumFailed').textContent = data.summary.failed;
+            document.getElementById('sumTotal').textContent = data.total_tasks;
+
+            // Update columns
+            for (const [status, col] of Object.entries(data.columns)) {
+                const colId = 'col' + status.charAt(0).toUpperCase() + status.slice(1);
+                const countId = 'count' + status.charAt(0).toUpperCase() + status.slice(1);
+                const colEl = document.getElementById(colId);
+                const countEl = document.getElementById(countId);
+                if (!colEl) continue;
+
+                countEl.textContent = col.tasks.length;
+                if (col.tasks.length === 0) {
+                    colEl.innerHTML = renderEmptyState(status);
+                } else {
+                    colEl.innerHTML = col.tasks.map(renderTaskCard).join('');
+                }
+            }
+
+            // Update workflow banner
+            const banner = document.getElementById('workflowBanner');
+            if (data.workflow) {
+                banner.classList.add('visible');
+                document.getElementById('wfBannerTitle').textContent =
+                    'Workflow: ' + data.workflow.id + ' — ' + data.workflow.prompt.substring(0, 100);
+                const statusEl = document.getElementById('wfBannerStatus');
+                statusEl.textContent = data.workflow.status;
+                statusEl.className = 'workflow-badge badge badge-' + data.workflow.status;
+                document.getElementById('wfBannerPlan').textContent = data.workflow.plan || '';
+            } else {
+                banner.classList.remove('visible');
+            }
+        }
+
+        async function fetchWorkflowOptions() {
+            const res = await fetch('/api/workflows');
+            const workflows = await res.json();
+            const select = document.getElementById('workflowFilter');
+
+            // Preserve current selection
+            const current = select.value;
+            const existing = new Set();
+            for (const opt of select.options) existing.add(opt.value);
+
+            for (const w of workflows) {
+                if (!existing.has(w.id)) {
+                    const opt = document.createElement('option');
+                    opt.value = w.id;
+                    opt.textContent = `${w.id} — ${w.prompt.substring(0, 50)} (${w.status})`;
+                    select.appendChild(opt);
+                }
+            }
+            select.value = current;
+        }
+
+        document.getElementById('workflowFilter').addEventListener('change', (e) => {
+            currentWorkflowId = e.target.value;
+            fetchKanban();
+        });
+
+        // Check URL params for workflow_id
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('workflow_id')) {
+            currentWorkflowId = params.get('workflow_id');
+        }
+
+        // Initial load
+        fetchWorkflowOptions();
+        fetchKanban();
+
+        // Auto-refresh every 2 seconds
+        setInterval(fetchKanban, 2000);
+        setInterval(fetchWorkflowOptions, 5000);
+    </script>
+</body>
+</html>

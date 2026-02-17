@@ -13,7 +13,7 @@ from typing import Any
 from .agent_runner import AgentRunner
 from .db import Database
 from .external_runner import ExternalModelRunner
-from .models import AgentConfig, AgentState, AgentStatus, Task
+from .models import AgentConfig, AgentState, AgentStatus, Task, WorkflowStatus
 
 ProgressCallback = Callable[[dict[str, Any]], None] | None
 
@@ -122,6 +122,105 @@ class AgentManager:
         except Exception:
             logger.debug("Progress callback error", exc_info=True)
 
+    def resume_task(
+        self,
+        task_id: str,
+        user_response: str,
+        on_progress: ProgressCallback = None,
+    ) -> Task:
+        """Resume a waiting-for-input task with the user's response."""
+        task = self.db.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Task {task_id} not found")
+        if task.status != "waiting_for_input":
+            raise ValueError(f"Task {task_id} is not waiting for input (status={task.status})")
+        if not task.session_id:
+            raise ValueError(f"Task {task_id} has no session_id for resume")
+
+        agent_id = task.agent_id
+        with self._lock:
+            state = self._agents.get(agent_id)
+        if state is None:
+            raise ValueError(f"Agent {agent_id} not registered")
+
+        runner = AgentRunner(state.config)
+        with self._lock:
+            self._runners[agent_id] = runner
+            state.status = AgentStatus.RUNNING
+            state.current_task_id = task.id
+
+        task.status = "running"
+        self.db.save_task(task)
+
+        # Reset workflow status so stale waiting_for_input doesn't re-trigger
+        if task.workflow_id:
+            wf = self.db.get_workflow(task.workflow_id)
+            if wf and wf.status == WorkflowStatus.WAITING_FOR_INPUT:
+                wf.status = WorkflowStatus.PLANNING
+                self.db.save_workflow(wf)
+
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._execute_resume(agent_id, runner, task, user_response, on_progress),
+                self._loop,
+            )
+        return task
+
+    async def _execute_resume(
+        self,
+        agent_id: str,
+        runner: AgentRunner,
+        task: Task,
+        user_response: str,
+        on_progress: ProgressCallback = None,
+    ) -> None:
+        """Execute a resumed task and update state on completion."""
+        log_path = self.log_dir / f"{agent_id}.log"
+
+        def on_message(msg: object) -> None:
+            with open(log_path, "a") as f:
+                f.write(f"{msg}\n")
+
+        self._fire_progress(on_progress, {"kind": "status_change", "status": "running", "task_id": task.id})
+
+        try:
+            result = await runner.resume_task(task, user_response, on_message=on_message)
+
+            # Check if Brain is asking more questions
+            if task.workflow_id:
+                wf = self.db.get_workflow(task.workflow_id)
+                if wf and wf.status == WorkflowStatus.WAITING_FOR_INPUT:
+                    task.status = "waiting_for_input"
+                    task.result = result
+                    with self._lock:
+                        state = self._agents[agent_id]
+                        state.status = AgentStatus.IDLE
+                        state.current_task_id = None
+                    self._fire_progress(on_progress, {"kind": "waiting_for_input", "task_id": task.id})
+                    self.db.save_task(task)
+                    return
+
+            task.status = "completed"
+            task.result = result
+            task.completed_at = datetime.now(timezone.utc)
+            with self._lock:
+                state = self._agents[agent_id]
+                state.status = AgentStatus.IDLE
+                state.current_task_id = None
+            self._fire_progress(on_progress, {"kind": "task_completed", "task_id": task.id})
+        except Exception as e:
+            logger.exception("Resume task %s failed for agent %s", task.id, agent_id)
+            task.status = "failed"
+            task.error = str(e)
+            task.completed_at = datetime.now(timezone.utc)
+            with self._lock:
+                state = self._agents[agent_id]
+                state.status = AgentStatus.ERROR
+                state.error = str(e)
+            self._fire_progress(on_progress, {"kind": "task_failed", "task_id": task.id, "error": str(e)})
+        finally:
+            self.db.save_task(task)
+
     async def _execute_task(
         self,
         agent_id: str,
@@ -146,6 +245,21 @@ class AgentManager:
                 result = await ext_runner.run(task.prompt, state.config.system_prompt)
             else:
                 result = await runner.run_task(task, on_message=on_message)
+
+            # Check if the Brain set workflow to waiting_for_input
+            if task.workflow_id:
+                wf = self.db.get_workflow(task.workflow_id)
+                if wf and wf.status == WorkflowStatus.WAITING_FOR_INPUT:
+                    task.status = "waiting_for_input"
+                    task.result = result
+                    with self._lock:
+                        state = self._agents[agent_id]
+                        state.status = AgentStatus.IDLE
+                        state.current_task_id = None
+                    self._fire_progress(on_progress, {"kind": "waiting_for_input", "task_id": task.id})
+                    self.db.save_task(task)
+                    return
+
             task.status = "completed"
             task.result = result
             task.completed_at = datetime.now(timezone.utc)

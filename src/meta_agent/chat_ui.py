@@ -69,6 +69,8 @@ def print_progress(event: dict) -> None:
         total = event.get("total", "?")
         error = event.get("error", "unknown error")
         console.print(f"  [red]✗[/red] Subtask {idx}/{total} failed: {error}")
+    elif kind == "waiting_for_input":
+        console.print("  [cyan]?[/cyan] Brain needs clarification")
     elif kind == "assembling":
         console.print("  [yellow]◐[/yellow] Assembling final result...")
     elif kind == "completed":

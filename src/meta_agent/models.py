@@ -25,6 +25,7 @@ class AgentConfig(BaseModel):
     allowed_tools: list[str] = Field(
         default_factory=lambda: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"]
     )
+    disallowed_tools: list[str] = Field(default_factory=list)
     model: str = "claude-sonnet-4-5-20250929"
     max_turns: int = 50
     max_budget_usd: float | None = None
@@ -62,6 +63,7 @@ class Task(BaseModel):
 
 class WorkflowStatus(str, Enum):
     PLANNING = "planning"
+    WAITING_FOR_INPUT = "waiting_for_input"
     EXECUTING = "executing"
     ASSEMBLING = "assembling"
     COMPLETED = "completed"

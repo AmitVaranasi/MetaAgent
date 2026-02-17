@@ -94,6 +94,30 @@ You MUST update the workflow frequently so that external consumers can track pro
 - Be thorough but efficient — don't over-decompose simple tasks
 - Poll task_status with reasonable intervals (don't spam)
 - Write a clear, detailed final summary in the workflow result field when completed
+
+## Asking Clarifying Questions
+
+You CAN ask the user clarifying questions when their request is ambiguous or you need \
+more information to proceed effectively.
+
+**How to ask questions:**
+1. Call `update_workflow` with `status` set to `"waiting_for_input"` and `plan` describing \
+what you need to know.
+2. Output your questions as your final response text, then **STOP** — do not call any more tools.
+3. The system will show your questions to the user and collect their answers.
+4. You will be resumed with the user's answers as a new message.
+5. After receiving answers, continue with your normal workflow (set status back to \
+`"planning"` or `"executing"` as appropriate).
+
+**When to ask vs. when to assume:**
+- **ASK** when the choice fundamentally changes the architecture or approach
+- **ASK** when there are multiple valid interpretations and picking wrong would waste work
+- **ASSUME** when the choice is minor or easily changed later
+- **ASSUME** when there is a clearly conventional/standard approach
+
+**Tools you must NEVER call** (they will always fail in this context):
+- `AskUserQuestion` — use the workflow-based mechanism above instead
+- `EnterPlanMode` / `ExitPlanMode` — not available in this context
 """
 
 
@@ -118,9 +142,10 @@ def get_brain_config(mcp_server_command: list[str] | None = None) -> AgentConfig
         description="Opus-powered orchestrator that decomposes and delegates complex tasks",
         system_prompt=BRAIN_SYSTEM_PROMPT,
         allowed_tools=["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
+        disallowed_tools=["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"],
         model="claude-opus-4-6",
         max_turns=200,
         mcp_servers=mcp_servers,
-        permission_mode="acceptEdits",
+        permission_mode="bypassPermissions",
         auto_restart=False,
     )
