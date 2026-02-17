@@ -42,10 +42,16 @@
 <body>
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:20px;">
         <h1>Meta-Agent Dashboard</h1>
-        <a href="/kanban" style="color:#58a6ff; text-decoration:none; padding:8px 16px; border:1px solid #30363d; border-radius:6px; font-size:0.9em; transition:all 0.2s;"
-           onmouseover="this.style.background='#21262d'" onmouseout="this.style.background='transparent'">
-            📋 Kanban Board →
-        </a>
+        <div style="display:flex; gap:8px;">
+            <a href="/kanban" style="color:#8b949e; text-decoration:none; padding:8px 16px; border:1px solid #30363d; border-radius:6px; font-size:0.9em; transition:all 0.2s;"
+               onmouseover="this.style.background='#21262d'" onmouseout="this.style.background='transparent'">
+                📋 Basic Kanban
+            </a>
+            <a href="/kanban/enhanced" style="color:#58a6ff; text-decoration:none; padding:8px 16px; border:1px solid #58a6ff; border-radius:6px; font-size:0.9em; transition:all 0.2s; font-weight:600;"
+               onmouseover="this.style.background='#1a3a5c'" onmouseout="this.style.background='transparent'">
+                🧠 Agent Kanban Board →
+            </a>
+        </div>
     </div>
 
     <!-- Brain Workflow Section -->

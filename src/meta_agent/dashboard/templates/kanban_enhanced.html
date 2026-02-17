@@ -1,0 +1,1627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Kanban Board — Meta-Agent</title>
+    <style>
+        /* ===== RESET & BASE ===== */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: #0f1117;
+            color: #e1e4e8;
+            min-height: 100vh;
+            display: grid;
+            grid-template-rows: auto auto 1fr auto;
+            grid-template-columns: 1fr;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        /* ===== SCROLLBAR ===== */
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+        /* ===== TOP BAR ===== */
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            height: 52px;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            flex-shrink: 0;
+            z-index: 100;
+        }
+        .topbar-left { display: flex; align-items: center; gap: 14px; }
+        .topbar-title {
+            font-size: 1.1em;
+            font-weight: 700;
+            color: #58a6ff;
+            letter-spacing: -0.3px;
+        }
+        .live-indicator {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.75em;
+            color: #3fb950;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .live-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #3fb950;
+            animation: livePulse 2s ease-in-out infinite;
+        }
+        @keyframes livePulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.85); }
+        }
+        .topbar-right { display: flex; align-items: center; gap: 10px; }
+        .btn-nav {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            color: #8b949e;
+            text-decoration: none;
+            font-size: 0.85em;
+            padding: 5px 12px;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            transition: all 0.15s;
+            background: transparent;
+            cursor: pointer;
+        }
+        .btn-nav:hover { background: #21262d; color: #c9d1d9; border-color: #484f58; }
+        .last-updated {
+            font-size: 0.72em;
+            color: #484f58;
+        }
+
+        /* ===== WORKFLOW PROGRESS BAR ===== */
+        .workflow-progress-bar {
+            display: none;
+            padding: 10px 20px;
+            background: #0d1117;
+            border-bottom: 1px solid #21262d;
+            flex-shrink: 0;
+        }
+        .workflow-progress-bar.visible { display: block; }
+        .wf-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .wf-header-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+        .wf-id {
+            font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+            font-size: 0.78em;
+            color: #58a6ff;
+            background: #1a3a5c;
+            padding: 2px 7px;
+            border-radius: 4px;
+            white-space: nowrap;
+        }
+        .wf-prompt {
+            font-size: 0.83em;
+            color: #c9d1d9;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1;
+        }
+        .wf-status-badge {
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            white-space: nowrap;
+        }
+        .badge-pending { background: #3d2f00; color: #d29922; }
+        .badge-running { background: #1a3a5c; color: #58a6ff; }
+        .badge-completed { background: #1b4332; color: #3fb950; }
+        .badge-failed { background: #3d1117; color: #f85149; }
+        .badge-waiting_for_input { background: #2d1f5e; color: #a371f7; }
+        .badge-idle { background: #1b4332; color: #3fb950; }
+        .badge-stopped { background: #21262d; color: #484f58; }
+        .badge-error { background: #3d1117; color: #f85149; }
+        .badge-unknown { background: #21262d; color: #484f58; }
+
+        .wf-progress-track {
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+            display: flex;
+            margin-bottom: 6px;
+        }
+        .wf-segment {
+            height: 100%;
+            transition: width 0.4s ease;
+        }
+        .seg-completed { background: #3fb950; }
+        .seg-running { background: #58a6ff; }
+        .seg-pending { background: #d29922; }
+        .seg-failed { background: #f85149; }
+        .seg-waiting { background: #a371f7; }
+
+        .wf-stats {
+            display: flex;
+            gap: 14px;
+            font-size: 0.72em;
+            color: #8b949e;
+        }
+        .wf-stats span { display: flex; align-items: center; gap: 4px; }
+        .wf-plan-toggle {
+            margin-top: 6px;
+            font-size: 0.78em;
+            color: #58a6ff;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            text-align: left;
+        }
+        .wf-plan-toggle:hover { text-decoration: underline; }
+        .wf-plan-content {
+            display: none;
+            margin-top: 6px;
+            padding: 8px 10px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            font-size: 0.78em;
+            color: #8b949e;
+            white-space: pre-wrap;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+        .wf-plan-content.open { display: block; }
+
+        /* ===== MAIN LAYOUT ===== */
+        .main-layout {
+            display: flex;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        /* ===== AGENT SIDEBAR ===== */
+        .sidebar {
+            width: 240px;
+            flex-shrink: 0;
+            background: #0d1117;
+            border-right: 1px solid #30363d;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .sidebar-header {
+            padding: 12px 14px;
+            border-bottom: 1px solid #21262d;
+            flex-shrink: 0;
+        }
+        .sidebar-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .sidebar-title h2 {
+            font-size: 0.82em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: #8b949e;
+        }
+        .agent-count-badge {
+            background: #21262d;
+            color: #8b949e;
+            padding: 1px 7px;
+            border-radius: 10px;
+            font-size: 0.72em;
+            font-weight: 600;
+        }
+        .sidebar-filter select {
+            width: 100%;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            padding: 5px 8px;
+            font-size: 0.8em;
+            outline: none;
+            cursor: pointer;
+        }
+        .sidebar-filter select:focus { border-color: #58a6ff; }
+
+        .agent-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+        .agent-item {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 9px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s, box-shadow 0.15s;
+            border: 1px solid transparent;
+            margin-bottom: 3px;
+            position: relative;
+        }
+        .agent-item:hover { background: #161b22; border-color: #30363d; }
+        .agent-item.selected {
+            background: #161b22;
+            border-color: #30363d;
+            box-shadow: inset 3px 0 0 #58a6ff;
+        }
+        .agent-avatar-wrap { position: relative; flex-shrink: 0; }
+        .agent-avatar-circle {
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.72em;
+            font-weight: 800;
+            color: white;
+            letter-spacing: -0.5px;
+        }
+        .agent-status-pip {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            border: 2px solid #0d1117;
+        }
+        .pip-running { background: #3fb950; animation: pipPulse 1.5s ease-in-out infinite; }
+        .pip-idle { background: #3fb950; }
+        .pip-stopped { background: #484f58; }
+        .pip-error { background: #f85149; }
+        .pip-unknown { background: #484f58; }
+        @keyframes pipPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(63,185,80,0.4); }
+            50% { box-shadow: 0 0 0 4px rgba(63,185,80,0); }
+        }
+
+        .agent-info-col { flex: 1; min-width: 0; }
+        .agent-item-name {
+            font-size: 0.82em;
+            font-weight: 600;
+            color: #e1e4e8;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .agent-item-model {
+            font-size: 0.7em;
+            color: #484f58;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .agent-task-badge {
+            background: #21262d;
+            color: #8b949e;
+            padding: 1px 6px;
+            border-radius: 8px;
+            font-size: 0.68em;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .agent-task-badge.has-tasks {
+            background: #1a3a5c;
+            color: #58a6ff;
+        }
+
+        .sidebar-footer {
+            padding: 10px 14px;
+            border-top: 1px solid #21262d;
+            flex-shrink: 0;
+        }
+        .clear-filter-btn {
+            width: 100%;
+            padding: 5px;
+            background: none;
+            border: 1px solid #30363d;
+            border-radius: 5px;
+            color: #8b949e;
+            font-size: 0.75em;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .clear-filter-btn:hover { background: #21262d; color: #c9d1d9; }
+
+        /* ===== KANBAN AREA ===== */
+        .kanban-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-width: 0;
+        }
+        .kanban-columns {
+            flex: 1;
+            display: flex;
+            gap: 12px;
+            padding: 14px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            align-items: stretch;
+            min-height: 0;
+        }
+
+        /* ===== KANBAN COLUMN ===== */
+        .kanban-col {
+            flex: 1;
+            min-width: 240px;
+            max-width: 380px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .col-header {
+            padding: 11px 14px 10px;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        .col-header-left { display: flex; align-items: center; gap: 7px; }
+        .col-icon { font-size: 1em; }
+        .col-title { font-size: 0.87em; font-weight: 600; }
+        .col-count {
+            background: #21262d;
+            color: #8b949e;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.75em;
+            font-weight: 700;
+            min-width: 22px;
+            text-align: center;
+        }
+
+        /* Column top border colors */
+        .col-pending   { border-top: 3px solid #d29922; }
+        .col-running   { border-top: 3px solid #58a6ff; }
+        .col-waiting   { border-top: 3px solid #a371f7; }
+        .col-completed { border-top: 3px solid #3fb950; }
+        .col-failed    { border-top: 3px solid #f85149; }
+
+        .col-pending .col-count.active   { background: #3d2f00; color: #d29922; }
+        .col-running .col-count.active   { background: #1a3a5c; color: #58a6ff; }
+        .col-waiting .col-count.active   { background: #2d1f5e; color: #a371f7; }
+        .col-completed .col-count.active { background: #1b4332; color: #3fb950; }
+        .col-failed .col-count.active    { background: #3d1117; color: #f85149; }
+
+        .col-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        /* ===== TASK CARD ===== */
+        .task-card {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px;
+            cursor: pointer;
+            transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s, opacity 0.2s;
+            position: relative;
+        }
+        .task-card:hover {
+            border-color: #58a6ff;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+        }
+        .task-card.dim {
+            opacity: 0.3;
+            pointer-events: none;
+        }
+        .task-card.highlight {
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 1px #58a6ff22;
+        }
+        .task-card.is-subtask {
+            margin-left: 10px;
+            background: #0a0d12;
+            border-style: dashed;
+            font-size: 0.93em;
+        }
+
+        .task-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 7px;
+            gap: 6px;
+        }
+        .task-id {
+            font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+            font-size: 0.74em;
+            color: #58a6ff;
+            background: #1a3a5c;
+            padding: 2px 6px;
+            border-radius: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 120px;
+        }
+        .task-time {
+            font-size: 0.72em;
+            color: #484f58;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .task-prompt {
+            font-size: 0.83em;
+            color: #c9d1d9;
+            line-height: 1.45;
+            margin-bottom: 9px;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .task-card.expanded .task-prompt { -webkit-line-clamp: unset; }
+
+        /* Agent Badge */
+        .agent-badge {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            padding: 5px 8px;
+            margin-bottom: 8px;
+        }
+        .badge-avatar {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.62em;
+            font-weight: 800;
+            color: white;
+            flex-shrink: 0;
+        }
+        .badge-info { flex: 1; min-width: 0; }
+        .badge-name {
+            font-size: 0.78em;
+            font-weight: 600;
+            color: #e1e4e8;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .badge-model {
+            font-size: 0.68em;
+            color: #484f58;
+        }
+        .badge-status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .bsd-running { background: #3fb950; animation: pipPulse 1.5s infinite; }
+        .bsd-idle    { background: #3fb950; }
+        .bsd-stopped { background: #484f58; }
+        .bsd-error   { background: #f85149; }
+        .bsd-unknown { background: #484f58; }
+
+        /* Subtask Indicator */
+        .subtask-indicator {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 8px;
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 5px;
+            margin-bottom: 8px;
+            font-size: 0.76em;
+            color: #8b949e;
+        }
+        .subtask-indicator-label { flex: 1; min-width: 0; }
+        .subtask-mini-bar {
+            width: 60px;
+            height: 4px;
+            background: #21262d;
+            border-radius: 2px;
+            overflow: hidden;
+            display: flex;
+            flex-shrink: 0;
+        }
+        .stb-completed { background: #3fb950; height: 100%; }
+        .stb-running   { background: #58a6ff; height: 100%; }
+        .stb-pending   { background: #d29922; height: 100%; }
+        .stb-failed    { background: #f85149; height: 100%; }
+
+        /* Expanded Content */
+        .task-expanded-content { display: none; }
+        .task-card.expanded .task-expanded-content { display: block; }
+
+        .task-result-box {
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: #0d2318;
+            border: 1px solid #2ea043;
+            border-radius: 6px;
+            font-size: 0.78em;
+            color: #3fb950;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 130px;
+            overflow-y: auto;
+        }
+        .task-error-box {
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: #1f0d0d;
+            border: 1px solid #f85149;
+            border-radius: 6px;
+            font-size: 0.78em;
+            color: #f85149;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 130px;
+            overflow-y: auto;
+        }
+
+        /* Lifecycle Timeline */
+        .lifecycle-timeline {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 3px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #21262d;
+        }
+        .lc-step {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 0.7em;
+            color: #484f58;
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+        .lc-step.lc-done   { color: #3fb950; }
+        .lc-step.lc-active { color: #58a6ff; font-weight: 700; background: #1a3a5c30; }
+        .lc-step.lc-error  { color: #f85149; }
+        .lc-step.lc-waiting { color: #a371f7; font-weight: 700; background: #2d1f5e30; }
+        .lc-arrow { color: #30363d; font-size: 0.65em; }
+
+        /* Workflow link */
+        .task-workflow-link {
+            margin-top: 7px;
+            font-size: 0.72em;
+            color: #58a6ff;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .task-workflow-link a {
+            color: #58a6ff;
+            text-decoration: none;
+        }
+        .task-workflow-link a:hover { text-decoration: underline; }
+
+        /* Nested subtask section */
+        .nested-subtasks {
+            margin-top: 10px;
+        }
+        .nested-subtasks-title {
+            font-size: 0.73em;
+            color: #8b949e;
+            font-weight: 600;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .nested-task-card {
+            background: #0a0d12;
+            border: 1px dashed #30363d;
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+        .nested-task-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 4px;
+        }
+        .nested-task-prompt {
+            font-size: 0.8em;
+            color: #8b949e;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        /* Empty Column State */
+        .empty-col {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 40px 16px;
+            color: #30363d;
+            text-align: center;
+            flex: 1;
+        }
+        .empty-col-icon { font-size: 2.2em; margin-bottom: 8px; opacity: 0.5; }
+        .empty-col-text { font-size: 0.8em; }
+
+        /* ===== SUMMARY FOOTER ===== */
+        .summary-footer {
+            background: #161b22;
+            border-top: 1px solid #30363d;
+            padding: 8px 20px;
+            display: flex;
+            align-items: center;
+            gap: 0;
+            flex-shrink: 0;
+            flex-wrap: wrap;
+        }
+        .sf-stat {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 16px;
+            font-size: 0.82em;
+        }
+        .sf-stat:not(:last-child) {
+            border-right: 1px solid #30363d;
+        }
+        .sf-num { font-weight: 700; font-size: 1.15em; }
+        .sf-label { color: #484f58; }
+        .sf-total .sf-num { color: #c9d1d9; }
+        .sf-pending .sf-num { color: #d29922; }
+        .sf-running .sf-num { color: #58a6ff; }
+        .sf-waiting .sf-num { color: #a371f7; }
+        .sf-completed .sf-num { color: #3fb950; }
+        .sf-failed .sf-num { color: #f85149; }
+        .sf-pct {
+            margin-left: auto;
+            font-size: 0.75em;
+            color: #8b949e;
+            padding: 4px 0;
+        }
+        .sf-pct-bar {
+            display: inline-block;
+            width: 60px;
+            height: 4px;
+            background: #21262d;
+            border-radius: 2px;
+            overflow: hidden;
+            vertical-align: middle;
+            margin: 0 6px;
+        }
+        .sf-pct-fill {
+            height: 100%;
+            background: #3fb950;
+            border-radius: 2px;
+            transition: width 0.4s ease;
+        }
+
+        /* ===== RESPONSIVE SIDEBAR COLLAPSE ===== */
+        @media (max-width: 900px) {
+            .sidebar {
+                width: 0;
+                overflow: hidden;
+                border-right: none;
+            }
+            .kanban-columns { padding: 10px; gap: 8px; }
+        }
+
+        /* ===== CARD ENTRY ANIMATION ===== */
+        @keyframes cardIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .task-card { animation: cardIn 0.2s ease; }
+
+        /* ===== TOOLTIP ===== */
+        [title] { cursor: help; }
+    </style>
+</head>
+<body>
+
+    <!-- ===== TOP BAR ===== -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <span class="topbar-title">&#x1F9E0; Agent Kanban Board</span>
+            <div class="live-indicator">
+                <div class="live-dot"></div>
+                LIVE
+            </div>
+        </div>
+        <div class="topbar-right">
+            <span class="last-updated" id="lastUpdated"></span>
+            <a href="/" class="btn-nav">&#x2190; Dashboard</a>
+        </div>
+    </div>
+
+    <!-- ===== WORKFLOW PROGRESS BAR ===== -->
+    <div class="workflow-progress-bar" id="workflowProgressBar">
+        <div class="wf-header">
+            <div class="wf-header-left">
+                <span class="wf-id" id="wfId"></span>
+                <span class="wf-prompt" id="wfPrompt"></span>
+            </div>
+            <span class="wf-status-badge" id="wfStatusBadge"></span>
+        </div>
+        <div class="wf-progress-track" id="wfProgressTrack"></div>
+        <div class="wf-stats" id="wfStats"></div>
+        <button class="wf-plan-toggle" id="wfPlanToggle" style="display:none">
+            &#x25BA; Show Plan
+        </button>
+        <div class="wf-plan-content" id="wfPlanContent"></div>
+    </div>
+
+    <!-- ===== MAIN LAYOUT ===== -->
+    <div class="main-layout">
+
+        <!-- ===== AGENT SIDEBAR ===== -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-title">
+                    <h2>Agents</h2>
+                    <span class="agent-count-badge" id="agentCount">0</span>
+                </div>
+                <div class="sidebar-filter">
+                    <select id="workflowFilter">
+                        <option value="">All Workflows</option>
+                    </select>
+                </div>
+            </div>
+            <div class="agent-list" id="agentList">
+                <!-- Populated by JS -->
+            </div>
+            <div class="sidebar-footer">
+                <button class="clear-filter-btn" id="clearFilterBtn">
+                    Clear Agent Filter
+                </button>
+            </div>
+        </aside>
+
+        <!-- ===== KANBAN AREA ===== -->
+        <div class="kanban-area">
+            <div class="kanban-columns">
+
+                <!-- Pending -->
+                <div class="kanban-col col-pending">
+                    <div class="col-header">
+                        <div class="col-header-left">
+                            <span class="col-icon">&#x23F3;</span>
+                            <span class="col-title">Pending</span>
+                        </div>
+                        <span class="col-count" id="countPending">0</span>
+                    </div>
+                    <div class="col-body" id="colPending"></div>
+                </div>
+
+                <!-- Running -->
+                <div class="kanban-col col-running">
+                    <div class="col-header">
+                        <div class="col-header-left">
+                            <span class="col-icon">&#x1F504;</span>
+                            <span class="col-title">Running</span>
+                        </div>
+                        <span class="col-count" id="countRunning">0</span>
+                    </div>
+                    <div class="col-body" id="colRunning"></div>
+                </div>
+
+                <!-- Waiting for Input -->
+                <div class="kanban-col col-waiting">
+                    <div class="col-header">
+                        <div class="col-header-left">
+                            <span class="col-icon">&#x1F4AC;</span>
+                            <span class="col-title">Waiting for Input</span>
+                        </div>
+                        <span class="col-count" id="countWaiting">0</span>
+                    </div>
+                    <div class="col-body" id="colWaiting"></div>
+                </div>
+
+                <!-- Completed -->
+                <div class="kanban-col col-completed">
+                    <div class="col-header">
+                        <div class="col-header-left">
+                            <span class="col-icon">&#x2705;</span>
+                            <span class="col-title">Completed</span>
+                        </div>
+                        <span class="col-count" id="countCompleted">0</span>
+                    </div>
+                    <div class="col-body" id="colCompleted"></div>
+                </div>
+
+                <!-- Failed -->
+                <div class="kanban-col col-failed">
+                    <div class="col-header">
+                        <div class="col-header-left">
+                            <span class="col-icon">&#x274C;</span>
+                            <span class="col-title">Failed</span>
+                        </div>
+                        <span class="col-count" id="countFailed">0</span>
+                    </div>
+                    <div class="col-body" id="colFailed"></div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== SUMMARY FOOTER ===== -->
+    <footer class="summary-footer">
+        <div class="sf-stat sf-total">
+            <span class="sf-num" id="sfTotal">0</span>
+            <span class="sf-label">total</span>
+        </div>
+        <div class="sf-stat sf-pending">
+            <span class="sf-num" id="sfPending">0</span>
+            <span class="sf-label">pending</span>
+        </div>
+        <div class="sf-stat sf-running">
+            <span class="sf-num" id="sfRunning">0</span>
+            <span class="sf-label">running</span>
+        </div>
+        <div class="sf-stat sf-waiting">
+            <span class="sf-num" id="sfWaiting">0</span>
+            <span class="sf-label">waiting</span>
+        </div>
+        <div class="sf-stat sf-completed">
+            <span class="sf-num" id="sfCompleted">0</span>
+            <span class="sf-label">done</span>
+        </div>
+        <div class="sf-stat sf-failed">
+            <span class="sf-num" id="sfFailed">0</span>
+            <span class="sf-label">failed</span>
+        </div>
+        <div class="sf-pct" id="sfPct">
+            <span id="sfPctNum">0%</span> complete
+            <span class="sf-pct-bar"><span class="sf-pct-fill" id="sfPctFill" style="width:0%"></span></span>
+        </div>
+    </footer>
+
+<script>
+'use strict';
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+
+function escapeHtml(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = String(str);
+    return d.innerHTML;
+}
+
+function timeAgo(dateStr) {
+    if (!dateStr || dateStr === 'None' || dateStr === 'null') return '';
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return '';
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 5)   return 'just now';
+    if (seconds < 60)  return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+}
+
+function agentColor(id) {
+    const palette = [
+        '#6366f1', '#0969da', '#8250df', '#1a7f37',
+        '#bf8700', '#cf222e', '#0550ae', '#953800',
+        '#1b7c83', '#7c3aed', '#2563eb', '#9333ea',
+        '#0891b2', '#be185d', '#b45309',
+    ];
+    let hash = 0;
+    const s = String(id);
+    for (let i = 0; i < s.length; i++) {
+        hash = ((hash << 5) - hash) + s.charCodeAt(i);
+        hash |= 0;
+    }
+    return palette[Math.abs(hash) % palette.length];
+}
+
+function agentInitials(name) {
+    if (!name) return '??';
+    return name.split(/[\s_\-]+/)
+               .filter(Boolean)
+               .map(w => w[0])
+               .join('')
+               .toUpperCase()
+               .substring(0, 2) || name.substring(0, 2).toUpperCase();
+}
+
+function truncate(str, max) {
+    if (!str) return '';
+    return str.length > max ? str.substring(0, max) + '...' : str;
+}
+
+/* ============================================================
+   STATE
+   ============================================================ */
+
+let selectedAgentId = null;   // Currently selected agent in sidebar
+let currentWorkflowId = '';   // Workflow filter
+let expandedCardIds = new Set(); // Cards with expanded detail
+let lastData = null;          // Cache last full API response
+
+/* ============================================================
+   LIFECYCLE TIMELINE BUILDER
+   ============================================================ */
+
+function buildLifecycleHTML(task) {
+    // Steps depend on status
+    const statusOrder = ['pending', 'running', 'waiting_for_input', 'completed', 'failed'];
+    const currentIdx = statusOrder.indexOf(task.status);
+
+    const steps = [
+        { key: 'created',  label: 'Created',  always: true },
+        { key: 'pending',  label: 'Pending' },
+        { key: 'running',  label: 'Running' },
+        { key: 'waiting_for_input', label: 'Waiting', omit: task.status !== 'waiting_for_input' && currentIdx > 2 },
+        { key: 'completed', label: task.status === 'failed' ? 'Failed' : 'Done' },
+    ];
+
+    const parts = [];
+    steps.forEach((step, i) => {
+        if (step.omit) return;
+
+        let cls = 'lc-step';
+        let icon = '○';
+
+        if (step.key === 'created') {
+            cls += ' lc-done'; icon = '✓';
+        } else if (step.key === task.status) {
+            if (step.key === 'completed') { cls += ' lc-done'; icon = '✓'; }
+            else if (step.key === 'failed') { cls += ' lc-error'; icon = '✗'; }
+            else if (step.key === 'waiting_for_input') { cls += ' lc-waiting'; icon = '◐'; }
+            else { cls += ' lc-active'; icon = '◐'; }
+        } else {
+            const stepIdx = statusOrder.indexOf(step.key);
+            if (stepIdx < currentIdx || task.status === 'completed' || task.status === 'failed') {
+                cls += ' lc-done'; icon = '✓';
+            }
+        }
+
+        if (parts.length > 0) {
+            parts.push('<span class="lc-arrow">›</span>');
+        }
+        parts.push(`<span class="${cls}">${icon} ${step.label}</span>`);
+    });
+
+    return `<div class="lifecycle-timeline">${parts.join('')}</div>`;
+}
+
+/* ============================================================
+   SUBTASK INDICATOR BUILDER
+   ============================================================ */
+
+function buildSubtaskIndicator(subtasks) {
+    if (!subtasks || subtasks.length === 0) return '';
+
+    const total = subtasks.length;
+    const completed = subtasks.filter(s => s.status === 'completed').length;
+    const running   = subtasks.filter(s => s.status === 'running').length;
+    const failed    = subtasks.filter(s => s.status === 'failed').length;
+    const waiting   = subtasks.filter(s => s.status === 'waiting_for_input').length;
+    const pending   = total - completed - running - failed - waiting;
+
+    const pctCompleted = (completed / total) * 100;
+    const pctRunning   = (running / total)   * 100;
+    const pctPending   = (pending / total)   * 100;
+    const pctFailed    = (failed / total)    * 100;
+
+    const parts = [];
+    if (completed) parts.push(`${completed}&#x2705;`);
+    if (running)   parts.push(`${running}&#x1F504;`);
+    if (waiting)   parts.push(`${waiting}&#x1F4AC;`);
+    if (failed)    parts.push(`${failed}&#x274C;`);
+    if (pending)   parts.push(`${pending}&#x23F3;`);
+
+    return `
+        <div class="subtask-indicator">
+            <span class="subtask-indicator-label">&#x1F4CB; ${total} subtask${total !== 1 ? 's' : ''} (${parts.join(' ')})</span>
+            <div class="subtask-mini-bar">
+                <div class="stb-completed" style="width:${pctCompleted}%"></div>
+                <div class="stb-running"   style="width:${pctRunning}%"></div>
+                <div class="stb-pending"   style="width:${pctPending}%"></div>
+                <div class="stb-failed"    style="width:${pctFailed}%"></div>
+            </div>
+        </div>
+    `;
+}
+
+/* ============================================================
+   NESTED SUBTASK CARDS
+   ============================================================ */
+
+function buildNestedSubtasksHTML(subtasks) {
+    if (!subtasks || subtasks.length === 0) return '';
+
+    const cards = subtasks.map(s => {
+        const agentBg = agentColor(s.agent ? s.agent.id : s.agent_id || 'x');
+        const agentName = s.agent ? s.agent.name : (s.agent_id || 'Unknown');
+        const initials  = agentInitials(agentName);
+        const statusBadgeClass = 'badge-' + (s.status || 'unknown');
+
+        return `
+            <div class="nested-task-card">
+                <div class="nested-task-header">
+                    <span class="task-id" style="max-width:90px">${escapeHtml(truncate(s.id, 12))}</span>
+                    <span class="wf-status-badge ${statusBadgeClass}">${escapeHtml(s.status)}</span>
+                    <div class="badge-avatar" style="background:${agentBg}; width:18px; height:18px; font-size:0.55em">${escapeHtml(initials)}</div>
+                    <span style="font-size:0.72em; color:#8b949e; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${escapeHtml(agentName)}</span>
+                </div>
+                <div class="nested-task-prompt">${escapeHtml(s.prompt || '')}</div>
+                ${s.error ? `<div style="margin-top:4px; font-size:0.72em; color:#f85149;">${escapeHtml(truncate(s.error, 100))}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div class="nested-subtasks">
+            <div class="nested-subtasks-title">&#x1F4CB; Subtasks</div>
+            ${cards}
+        </div>
+    `;
+}
+
+/* ============================================================
+   TASK CARD BUILDER
+   ============================================================ */
+
+function buildTaskCard(task, isExpanded, agentFilter) {
+    const agentId    = task.agent ? task.agent.id : '';
+    const agentName  = task.agent ? task.agent.name  : 'Unknown';
+    const agentModel = task.agent ? task.agent.model : 'N/A';
+    const agentSt    = task.agent ? task.agent.status : 'unknown';
+    const agentBg    = agentColor(agentId);
+    const initials   = agentInitials(agentName);
+    const dotClass   = 'bsd-' + agentSt;
+
+    const isFiltered = agentFilter && agentFilter !== agentId;
+    const dimClass   = isFiltered ? 'dim' : '';
+    const hlClass    = (agentFilter && !isFiltered) ? 'highlight' : '';
+    const expClass   = isExpanded ? 'expanded' : '';
+
+    // Expanded-only content
+    const resultBox = (task.result && isExpanded)
+        ? `<div class="task-result-box">&#x2713; Result:<br>${escapeHtml(task.result)}</div>` : '';
+    const errorBox = (task.error && isExpanded)
+        ? `<div class="task-error-box">&#x2717; Error:<br>${escapeHtml(task.error)}</div>` : '';
+
+    const wfLink = (task.workflow_id && isExpanded)
+        ? `<div class="task-workflow-link">&#x1F517; Workflow: <a href="/kanban?workflow_id=${encodeURIComponent(task.workflow_id)}" title="Filter by this workflow">${escapeHtml(truncate(task.workflow_id, 20))}</a></div>` : '';
+
+    const nestedSubtasks = (task.subtasks && isExpanded)
+        ? buildNestedSubtasksHTML(task.subtasks) : '';
+
+    const lifecycle = isExpanded ? buildLifecycleHTML(task) : '';
+
+    // Always show subtask indicator if subtasks exist
+    const subtaskIndic = buildSubtaskIndicator(task.subtasks);
+
+    return `
+        <div class="task-card ${expClass} ${dimClass} ${hlClass}"
+             data-task-id="${escapeHtml(task.id)}"
+             data-agent-id="${escapeHtml(agentId)}"
+             onclick="toggleCard(this, '${escapeHtml(task.id)}')">
+            <div class="task-card-header">
+                <span class="task-id" title="${escapeHtml(task.id)}">${escapeHtml(truncate(task.id, 16))}</span>
+                <span class="task-time">${timeAgo(task.created_at)}</span>
+            </div>
+            <div class="task-prompt">${escapeHtml(task.prompt || '')}</div>
+            <div class="agent-badge">
+                <div class="badge-avatar" style="background:${agentBg}">${escapeHtml(initials)}</div>
+                <div class="badge-info">
+                    <div class="badge-name">${escapeHtml(agentName)}</div>
+                    <div class="badge-model">${escapeHtml(agentModel)}</div>
+                </div>
+                <div class="badge-status-dot ${dotClass}" title="Agent status: ${escapeHtml(agentSt)}"></div>
+            </div>
+            ${subtaskIndic}
+            <div class="task-expanded-content">
+                ${resultBox}
+                ${errorBox}
+                ${wfLink}
+                ${lifecycle}
+                ${nestedSubtasks}
+            </div>
+        </div>
+    `;
+}
+
+/* ============================================================
+   CARD TOGGLE (EXPAND / COLLAPSE)
+   ============================================================ */
+
+function toggleCard(el, taskId) {
+    // Don't bubble from inner links
+    if (event && event.target && event.target.tagName === 'A') return;
+
+    const wasExpanded = expandedCardIds.has(taskId);
+    if (wasExpanded) {
+        expandedCardIds.delete(taskId);
+    } else {
+        expandedCardIds.add(taskId);
+    }
+    // Instead of full re-render, just toggle expanded state on this card
+    el.classList.toggle('expanded', !wasExpanded);
+    // Show/hide expanded content
+    const expContent = el.querySelector('.task-expanded-content');
+    if (expContent) expContent.style.display = !wasExpanded ? 'block' : 'none';
+
+    // Re-render expanded content if newly expanded (to ensure it's populated)
+    if (!wasExpanded && lastData) {
+        const allTasks = getAllTasks(lastData);
+        const task = allTasks.find(t => t.id === taskId);
+        if (task) {
+            const expSection = el.querySelector('.task-expanded-content');
+            if (expSection) {
+                // Build expanded content
+                const resultBox = task.result
+                    ? `<div class="task-result-box">&#x2713; Result:<br>${escapeHtml(task.result)}</div>` : '';
+                const errorBox = task.error
+                    ? `<div class="task-error-box">&#x2717; Error:<br>${escapeHtml(task.error)}</div>` : '';
+                const wfLink = task.workflow_id
+                    ? `<div class="task-workflow-link">&#x1F517; Workflow: <a href="/kanban?workflow_id=${encodeURIComponent(task.workflow_id)}">${escapeHtml(truncate(task.workflow_id, 20))}</a></div>` : '';
+                const lifecycle = buildLifecycleHTML(task);
+                const nested = buildNestedSubtasksHTML(task.subtasks);
+                expSection.innerHTML = resultBox + errorBox + wfLink + lifecycle + nested;
+                expSection.style.display = 'block';
+            }
+        }
+    }
+}
+
+function getAllTasks(data) {
+    const tasks = [];
+    if (!data || !data.columns) return tasks;
+    for (const col of Object.values(data.columns)) {
+        if (col.tasks) tasks.push(...col.tasks);
+    }
+    return tasks;
+}
+
+/* ============================================================
+   EMPTY STATE
+   ============================================================ */
+
+const EMPTY_STATES = {
+    pending:             { icon: '&#x23F3;', text: 'No tasks pending' },
+    running:             { icon: '&#x1F504;', text: 'No tasks running' },
+    waiting_for_input:   { icon: '&#x1F4AC;', text: 'No tasks waiting' },
+    completed:           { icon: '&#x2705;', text: 'No completed tasks yet' },
+    failed:              { icon: '&#x274C;', text: 'No failed tasks' },
+};
+
+function emptyColHTML(key) {
+    const e = EMPTY_STATES[key] || { icon: '&#x2753;', text: 'Empty' };
+    return `<div class="empty-col"><div class="empty-col-icon">${e.icon}</div><div class="empty-col-text">${e.text}</div></div>`;
+}
+
+/* ============================================================
+   RENDER COLUMNS
+   ============================================================ */
+
+const COL_MAP = {
+    pending:           { bodyId: 'colPending',   countId: 'countPending' },
+    running:           { bodyId: 'colRunning',   countId: 'countRunning' },
+    waiting_for_input: { bodyId: 'colWaiting',   countId: 'countWaiting' },
+    completed:         { bodyId: 'colCompleted', countId: 'countCompleted' },
+    failed:            { bodyId: 'colFailed',    countId: 'countFailed' },
+};
+
+function renderColumns(data) {
+    const columns = data.columns || {};
+    const agentFilter = selectedAgentId;
+
+    for (const [key, mapping] of Object.entries(COL_MAP)) {
+        const col = columns[key] || { tasks: [] };
+        const tasks = col.tasks || [];
+
+        const bodyEl  = document.getElementById(mapping.bodyId);
+        const countEl = document.getElementById(mapping.countId);
+        if (!bodyEl || !countEl) continue;
+
+        const visibleCount = agentFilter
+            ? tasks.filter(t => t.agent && t.agent.id === agentFilter).length
+            : tasks.length;
+
+        countEl.textContent = tasks.length;
+        countEl.className = 'col-count' + (tasks.length > 0 ? ' active' : '');
+
+        if (tasks.length === 0) {
+            // Only replace if different to avoid flicker
+            if (!bodyEl.querySelector('.empty-col')) {
+                bodyEl.innerHTML = emptyColHTML(key);
+            }
+            continue;
+        }
+
+        // Smart diff: update in place where possible
+        const existingCards = bodyEl.querySelectorAll('.task-card[data-task-id]');
+        const existingIds = new Set([...existingCards].map(el => el.dataset.taskId));
+        const newIds = new Set(tasks.map(t => t.id));
+
+        // Remove stale cards
+        existingCards.forEach(el => {
+            if (!newIds.has(el.dataset.taskId)) el.remove();
+        });
+
+        // Add/update cards
+        tasks.forEach((task, idx) => {
+            const isExpanded = expandedCardIds.has(task.id);
+            const existing = bodyEl.querySelector(`.task-card[data-task-id="${CSS.escape(task.id)}"]`);
+            const newHtml = buildTaskCard(task, isExpanded, agentFilter);
+
+            if (!existing) {
+                // Insert at correct position
+                const tmp = document.createElement('div');
+                tmp.innerHTML = newHtml;
+                const newCard = tmp.firstElementChild;
+                const cards = bodyEl.querySelectorAll('.task-card');
+                if (idx < cards.length) {
+                    bodyEl.insertBefore(newCard, cards[idx]);
+                } else {
+                    bodyEl.appendChild(newCard);
+                }
+            } else {
+                // Update dim/highlight without full re-render if not expanded
+                if (!isExpanded) {
+                    const isDim = agentFilter && agentFilter !== (task.agent ? task.agent.id : '');
+                    const isHl  = agentFilter && !isDim;
+                    existing.classList.toggle('dim', isDim);
+                    existing.classList.toggle('highlight', isHl);
+                    // Update time-ago
+                    const timeEl = existing.querySelector('.task-time');
+                    if (timeEl) timeEl.textContent = timeAgo(task.created_at);
+                }
+            }
+        });
+
+        // Remove any lingering empty state
+        const emptyEl = bodyEl.querySelector('.empty-col');
+        if (emptyEl) emptyEl.remove();
+    }
+}
+
+/* ============================================================
+   RENDER AGENT SIDEBAR
+   ============================================================ */
+
+function renderSidebar(data) {
+    const agents = data.agents || [];
+    const tasksByAgent = {};
+
+    // Count tasks per agent
+    const allTasks = getAllTasks(data);
+    allTasks.forEach(t => {
+        const aid = t.agent ? t.agent.id : '';
+        if (!tasksByAgent[aid]) tasksByAgent[aid] = 0;
+        tasksByAgent[aid]++;
+    });
+
+    const listEl = document.getElementById('agentList');
+    const countEl = document.getElementById('agentCount');
+    countEl.textContent = agents.length;
+
+    // Build HTML for each agent
+    const agentsHTML = agents.map(agent => {
+        const color    = agentColor(agent.id);
+        const initials = agentInitials(agent.name);
+        const pipClass = 'pip-' + (agent.status || 'unknown');
+        const taskCount = tasksByAgent[agent.id] || 0;
+        const isSelected = selectedAgentId === agent.id;
+        const selClass = isSelected ? 'selected' : '';
+        const badgeActive = taskCount > 0 ? 'has-tasks' : '';
+
+        return `
+            <div class="agent-item ${selClass}"
+                 data-agent-id="${escapeHtml(agent.id)}"
+                 onclick="selectAgent('${escapeHtml(agent.id)}')"
+                 title="${escapeHtml(agent.name)} | ${escapeHtml(agent.status)}">
+                <div class="agent-avatar-wrap">
+                    <div class="agent-avatar-circle" style="background:${color}">${escapeHtml(initials)}</div>
+                    <div class="agent-status-pip ${pipClass}"></div>
+                </div>
+                <div class="agent-info-col">
+                    <div class="agent-item-name">${escapeHtml(agent.name)}</div>
+                    <div class="agent-item-model">${escapeHtml(truncate(agent.model, 28))}</div>
+                </div>
+                <span class="agent-task-badge ${badgeActive}">${taskCount}</span>
+            </div>
+        `;
+    }).join('');
+
+    listEl.innerHTML = agentsHTML || '<div style="padding:16px; color:#484f58; font-size:0.8em; text-align:center;">No agents</div>';
+}
+
+/* ============================================================
+   RENDER WORKFLOW PROGRESS BAR
+   ============================================================ */
+
+function renderWorkflowBar(data) {
+    const barEl = document.getElementById('workflowProgressBar');
+
+    if (!data.workflow) {
+        barEl.classList.remove('visible');
+        return;
+    }
+
+    const wf = data.workflow;
+    barEl.classList.add('visible');
+
+    document.getElementById('wfId').textContent = truncate(wf.id, 20);
+    document.getElementById('wfPrompt').textContent = truncate(wf.prompt, 80);
+
+    const statusBadge = document.getElementById('wfStatusBadge');
+    statusBadge.textContent = wf.status;
+    statusBadge.className = 'wf-status-badge badge-' + (wf.status || 'unknown');
+
+    // Progress bar segments
+    const summary = data.summary || {};
+    const total = data.total_tasks || 0;
+    const track = document.getElementById('wfProgressTrack');
+
+    if (total > 0) {
+        const pctCompleted = ((summary.completed || 0) / total) * 100;
+        const pctRunning   = ((summary.running   || 0) / total) * 100;
+        const pctPending   = ((summary.pending   || 0) / total) * 100;
+        const pctFailed    = ((summary.failed    || 0) / total) * 100;
+        const pctWaiting   = ((summary.waiting_for_input || 0) / total) * 100;
+
+        track.innerHTML = `
+            <div class="wf-segment seg-completed" style="width:${pctCompleted}%"></div>
+            <div class="wf-segment seg-running"   style="width:${pctRunning}%"></div>
+            <div class="wf-segment seg-pending"   style="width:${pctPending}%"></div>
+            <div class="wf-segment seg-waiting"   style="width:${pctWaiting}%"></div>
+            <div class="wf-segment seg-failed"    style="width:${pctFailed}%"></div>
+        `;
+    } else {
+        track.innerHTML = '<div class="wf-segment seg-pending" style="width:100%;opacity:0.3"></div>';
+    }
+
+    // Stats line
+    const statsParts = [];
+    if (summary.completed) statsParts.push(`<span>&#x2705; ${summary.completed} done</span>`);
+    if (summary.running)   statsParts.push(`<span>&#x1F504; ${summary.running} running</span>`);
+    if (summary.pending)   statsParts.push(`<span>&#x23F3; ${summary.pending} pending</span>`);
+    if (summary.waiting_for_input) statsParts.push(`<span>&#x1F4AC; ${summary.waiting_for_input} waiting</span>`);
+    if (summary.failed)    statsParts.push(`<span>&#x274C; ${summary.failed} failed</span>`);
+    document.getElementById('wfStats').innerHTML = statsParts.join('');
+
+    // Plan toggle
+    const planToggle  = document.getElementById('wfPlanToggle');
+    const planContent = document.getElementById('wfPlanContent');
+    if (wf.plan) {
+        planToggle.style.display = 'block';
+        planContent.textContent = wf.plan;
+    } else {
+        planToggle.style.display = 'none';
+        planContent.classList.remove('open');
+    }
+}
+
+/* ============================================================
+   RENDER SUMMARY FOOTER
+   ============================================================ */
+
+function renderFooter(data) {
+    const s = data.summary || {};
+    const total     = data.total_tasks || 0;
+    const pending   = s.pending   || 0;
+    const running   = s.running   || 0;
+    const waiting   = s.waiting_for_input || 0;
+    const completed = s.completed || 0;
+    const failed    = s.failed    || 0;
+
+    document.getElementById('sfTotal').textContent     = total;
+    document.getElementById('sfPending').textContent   = pending;
+    document.getElementById('sfRunning').textContent   = running;
+    document.getElementById('sfWaiting').textContent   = waiting;
+    document.getElementById('sfCompleted').textContent = completed;
+    document.getElementById('sfFailed').textContent    = failed;
+
+    const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+    document.getElementById('sfPctNum').textContent = pct + '%';
+    document.getElementById('sfPctFill').style.width = pct + '%';
+}
+
+/* ============================================================
+   AGENT FILTER
+   ============================================================ */
+
+function selectAgent(agentId) {
+    if (selectedAgentId === agentId) {
+        selectedAgentId = null;
+    } else {
+        selectedAgentId = agentId;
+    }
+    // Re-render sidebar selection state
+    document.querySelectorAll('.agent-item').forEach(el => {
+        el.classList.toggle('selected', el.dataset.agentId === selectedAgentId);
+    });
+    // Apply dim/highlight to cards
+    applyAgentFilter();
+}
+
+function applyAgentFilter() {
+    document.querySelectorAll('.task-card[data-agent-id]').forEach(el => {
+        const aid = el.dataset.agentId;
+        if (!selectedAgentId) {
+            el.classList.remove('dim', 'highlight');
+        } else if (aid === selectedAgentId) {
+            el.classList.remove('dim');
+            el.classList.add('highlight');
+        } else {
+            el.classList.remove('highlight');
+            el.classList.add('dim');
+        }
+    });
+}
+
+document.getElementById('clearFilterBtn').addEventListener('click', () => {
+    selectedAgentId = null;
+    document.querySelectorAll('.agent-item').forEach(el => el.classList.remove('selected'));
+    applyAgentFilter();
+});
+
+/* ============================================================
+   WORKFLOW FILTER DROPDOWN
+   ============================================================ */
+
+document.getElementById('workflowFilter').addEventListener('change', (e) => {
+    currentWorkflowId = e.target.value;
+    // Update URL without reload
+    const url = new URL(window.location.href);
+    if (currentWorkflowId) {
+        url.searchParams.set('workflow_id', currentWorkflowId);
+    } else {
+        url.searchParams.delete('workflow_id');
+    }
+    window.history.replaceState({}, '', url.toString());
+    fetchKanban();
+});
+
+document.getElementById('wfPlanToggle').addEventListener('click', () => {
+    const content = document.getElementById('wfPlanContent');
+    const toggle  = document.getElementById('wfPlanToggle');
+    const isOpen  = content.classList.toggle('open');
+    toggle.textContent = isOpen ? '&#x25BC; Hide Plan' : '&#x25BA; Show Plan';
+});
+
+/* ============================================================
+   POPULATE WORKFLOW DROPDOWN
+   ============================================================ */
+
+async function fetchWorkflowOptions() {
+    try {
+        const res = await fetch('/api/workflows');
+        if (!res.ok) return;
+        const workflows = await res.json();
+        const select = document.getElementById('workflowFilter');
+
+        const existing = new Set([...select.options].map(o => o.value));
+        workflows.forEach(w => {
+            if (!existing.has(w.id)) {
+                const opt = document.createElement('option');
+                opt.value = w.id;
+                opt.textContent = truncate(w.id, 12) + ' — ' + truncate(w.prompt, 40) + ' (' + w.status + ')';
+                select.appendChild(opt);
+            } else {
+                // Update text if status changed
+                const opt = [...select.options].find(o => o.value === w.id);
+                if (opt) opt.textContent = truncate(w.id, 12) + ' — ' + truncate(w.prompt, 40) + ' (' + w.status + ')';
+            }
+        });
+
+        // Restore selection
+        if (currentWorkflowId) select.value = currentWorkflowId;
+    } catch (err) {
+        // Silent fail - API might not be up yet
+    }
+}
+
+/* ============================================================
+   MAIN DATA FETCH
+   ============================================================ */
+
+async function fetchKanban() {
+    try {
+        const url = currentWorkflowId
+            ? '/api/kanban/enhanced?workflow_id=' + encodeURIComponent(currentWorkflowId)
+            : '/api/kanban/enhanced';
+
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        lastData = data;
+
+        renderWorkflowBar(data);
+        renderColumns(data);
+        renderSidebar(data);
+        renderFooter(data);
+
+        // Update last-updated timestamp
+        const now = new Date();
+        document.getElementById('lastUpdated').textContent =
+            'Updated ' + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    } catch (err) {
+        // Silent fail
+        document.getElementById('lastUpdated').textContent = 'Connection error';
+    }
+}
+
+/* ============================================================
+   URL PARAM INIT
+   ============================================================ */
+
+(function initFromURL() {
+    const params = new URLSearchParams(window.location.search);
+    const wfId = params.get('workflow_id');
+    if (wfId) {
+        currentWorkflowId = wfId;
+        // Will be set on dropdown after workflows load
+    }
+})();
+
+/* ============================================================
+   START POLLING
+   ============================================================ */
+
+fetchWorkflowOptions().then(() => {
+    if (currentWorkflowId) {
+        document.getElementById('workflowFilter').value = currentWorkflowId;
+    }
+});
+fetchKanban();
+
+setInterval(fetchKanban, 2000);
+setInterval(fetchWorkflowOptions, 5000);
+
+</script>
+</body>
+</html>

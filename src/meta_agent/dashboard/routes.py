@@ -292,6 +292,172 @@ def api_kanban():
     })
 
 
+@bp.route("/kanban/enhanced")
+def kanban_enhanced_board():
+    return render_template("kanban_enhanced.html")
+
+
+@bp.route("/api/kanban/enhanced")
+def api_kanban_enhanced():
+    """Return tasks organised for the enhanced kanban view.
+
+    Groups tasks by agent (showing parent-child relationships) and also
+    provides the classic column view.  Supports ``?workflow_id=X`` filtering.
+    """
+    workflow_id = request.args.get("workflow_id")
+    mgr = _mgr()
+    all_tasks = mgr.list_tasks()
+    agents_list = mgr.list_agents()
+    agents_map = {a.config.id: a for a in agents_list}
+
+    # Optionally filter by workflow
+    if workflow_id:
+        all_tasks = [t for t in all_tasks if t.workflow_id == workflow_id]
+
+    # ------------------------------------------------------------------ #
+    # Build a task-id -> task-data dict so we can nest children under     #
+    # their parents efficiently.                                           #
+    # ------------------------------------------------------------------ #
+    def _task_dict(t, agent_info):
+        return {
+            "id": t.id,
+            "status": t.status,
+            "prompt": t.prompt,
+            "result": t.result,
+            "error": t.error,
+            "created_at": str(t.created_at),
+            "completed_at": str(t.completed_at) if t.completed_at else None,
+            "workflow_id": t.workflow_id,
+            "parent_task_id": t.parent_task_id,
+            "agent": agent_info,
+            "subtasks": [],
+        }
+
+    tasks_by_id = {}
+    for t in all_tasks:
+        agent = agents_map.get(t.agent_id)
+        agent_info = (
+            {
+                "id": agent.config.id,
+                "name": agent.config.name,
+                "model": agent.config.model,
+                "status": agent.status.value,
+            }
+            if agent
+            else {"id": t.agent_id, "name": "Unknown", "model": "N/A", "status": "unknown"}
+        )
+        tasks_by_id[t.id] = _task_dict(t, agent_info)
+
+    # Nest child tasks under their parents
+    root_tasks = []  # tasks that have no parent (or whose parent is not in the filtered set)
+    for t in all_tasks:
+        td = tasks_by_id[t.id]
+        if t.parent_task_id and t.parent_task_id in tasks_by_id:
+            tasks_by_id[t.parent_task_id]["subtasks"].append(td)
+        else:
+            root_tasks.append(td)
+
+    # ------------------------------------------------------------------ #
+    # Build per-agent view                                                 #
+    # ------------------------------------------------------------------ #
+    STATUSES = ("pending", "running", "completed", "failed", "waiting_for_input")
+
+    agent_task_map: dict[str, list] = {}
+    for t in all_tasks:
+        agent_task_map.setdefault(t.agent_id, []).append(tasks_by_id[t.id])
+
+    agents_view = []
+    for agent in agents_list:
+        aid = agent.config.id
+        agent_tasks = agent_task_map.get(aid, [])
+        # Only include root tasks (children appear nested inside their parent)
+        agent_root_tasks = [td for td in agent_tasks if not td["parent_task_id"] or td["parent_task_id"] not in tasks_by_id]
+        counts = {s: 0 for s in STATUSES}
+        for td in agent_tasks:
+            s = td["status"] if td["status"] in counts else "pending"
+            counts[s] += 1
+        agents_view.append({
+            "id": aid,
+            "name": agent.config.name,
+            "model": agent.config.model,
+            "status": agent.status.value,
+            "description": agent.config.description,
+            "tasks": agent_root_tasks,
+            "task_counts": counts,
+        })
+
+    # ------------------------------------------------------------------ #
+    # Build column view (flat, all root + leaf tasks, with agent info)    #
+    # ------------------------------------------------------------------ #
+    columns = {
+        "pending": {"label": "Pending", "icon": "⏳", "tasks": []},
+        "running": {"label": "Running", "icon": "🔄", "tasks": []},
+        "waiting_for_input": {"label": "Waiting for Input", "icon": "💬", "tasks": []},
+        "completed": {"label": "Completed", "icon": "✅", "tasks": []},
+        "failed": {"label": "Failed", "icon": "❌", "tasks": []},
+    }
+
+    for td in tasks_by_id.values():
+        col = td["status"] if td["status"] in columns else "pending"
+        columns[col]["tasks"].append(td)
+
+    # Sort columns
+    for key, col in columns.items():
+        if key in ("completed", "failed"):
+            col["tasks"].sort(
+                key=lambda x: x.get("completed_at") or x.get("created_at") or "",
+                reverse=True,
+            )
+        else:
+            col["tasks"].sort(key=lambda x: x.get("created_at") or "")
+
+    # ------------------------------------------------------------------ #
+    # Summary counts                                                       #
+    # ------------------------------------------------------------------ #
+    summary = {"total": len(all_tasks)}
+    for s in STATUSES:
+        summary[s] = len(columns[s]["tasks"])
+
+    # ------------------------------------------------------------------ #
+    # Workflow list (basic info) and optional detailed workflow            #
+    # ------------------------------------------------------------------ #
+    all_workflows = mgr.db.list_workflows()
+    workflows_basic = [
+        {
+            "id": w.id,
+            "prompt": w.prompt[:100],
+            "status": w.status.value,
+            "subtask_count": len(w.subtask_ids),
+            "created_at": str(w.created_at),
+            "completed_at": str(w.completed_at) if w.completed_at else None,
+        }
+        for w in all_workflows
+    ]
+
+    workflow_info = None
+    if workflow_id:
+        wf = mgr.db.get_workflow(workflow_id)
+        if wf:
+            workflow_info = {
+                "id": wf.id,
+                "prompt": wf.prompt,
+                "plan": wf.plan,
+                "status": wf.status.value,
+                "result": wf.result,
+                "error": wf.error,
+                "created_at": str(wf.created_at),
+                "completed_at": str(wf.completed_at) if wf.completed_at else None,
+            }
+
+    return jsonify({
+        "agents": agents_view,
+        "columns": columns,
+        "workflows": workflows_basic,
+        "summary": summary,
+        "workflow": workflow_info,
+    })
+
+
 @bp.route("/api/workflows/<workflow_id>")
 def api_get_workflow(workflow_id: str):
     workflow = _mgr().db.get_workflow(workflow_id)
