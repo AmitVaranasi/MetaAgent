@@ -33,7 +33,8 @@ def print_progress(event: dict) -> None:
     Expected event keys:
         kind: 'workflow_created' | 'planning' | 'plan_ready' |
               'subtask_running' | 'subtask_done' | 'subtask_failed' |
-              'assembling' | 'completed' | 'failed' | 'status_change'
+              'assembling' | 'completed' | 'failed' | 'status_change' |
+              'tool_call' | 'tool_result' | 'agent_progress'
         Plus context-specific keys (workflow_id, index, total, description, etc.)
     """
     kind = event.get("kind", "")
@@ -54,12 +55,41 @@ def print_progress(event: dict) -> None:
         total = event.get("total", "?")
         desc = event.get("description", "")
         agent = event.get("agent_id", "")
-        label = f"  [yellow]◐[/yellow] Running subtask {idx}/{total}"
+        label = f"  [yellow]◐[/yellow] Subtask {idx}/{total}"
         if desc:
             label += f": {desc}"
         if agent:
-            label += f" (agent: {agent})"
+            label += f" [dim](agent: {agent})[/dim]"
         console.print(label)
+
+    # --- Live tool call feed (new) ---
+    elif kind == "tool_call":
+        agent = event.get("agent_id", "?")
+        tool = event.get("tool", "?")
+        preview = event.get("input_preview", "")
+        # Compact one-liner: "  ↳ agent:abc123 → Read(src/auth.py...)"
+        line = f"    [dim]↳ {agent} → {tool}[/dim]"
+        if preview:
+            line += f"[dim]({preview[:80]})[/dim]"
+        console.print(line)
+    elif kind == "tool_result":
+        agent = event.get("agent_id", "?")
+        tool = event.get("tool", "?")
+        is_error = event.get("is_error", False)
+        if is_error:
+            preview = event.get("output_preview", "")
+            console.print(f"    [red]↳ {agent} ← {tool} ERROR: {preview[:100]}[/red]")
+        # Don't print successful tool results to avoid noise — only errors
+    elif kind == "agent_progress":
+        agent = event.get("agent_id", "?")
+        phase = event.get("phase", "")
+        msg = event.get("message", "")
+        phase_icon = {
+            "reading": "📖", "writing": "✏️", "testing": "🧪",
+            "done": "✅", "working": "⚙️",
+        }.get(phase, "⚙️")
+        console.print(f"    {phase_icon} [dim]{agent}:[/dim] {msg}")
+
     elif kind == "subtask_done":
         idx = event.get("index", "?")
         total = event.get("total", "?")
@@ -68,7 +98,13 @@ def print_progress(event: dict) -> None:
         idx = event.get("index", "?")
         total = event.get("total", "?")
         error = event.get("error", "unknown error")
-        console.print(f"  [red]✗[/red] Subtask {idx}/{total} failed: {error}")
+        # Show first 3 lines of error (which now includes context + traceback)
+        error_lines = error.strip().splitlines()
+        console.print(f"  [red]✗[/red] Subtask {idx}/{total} failed: {error_lines[0]}")
+        for line in error_lines[1:4]:
+            console.print(f"    [dim red]{line}[/dim red]")
+        if len(error_lines) > 4:
+            console.print(f"    [dim]... ({len(error_lines) - 4} more lines)[/dim]")
     elif kind == "waiting_for_input":
         console.print("  [cyan]?[/cyan] Brain needs clarification")
     elif kind == "assembling":
@@ -109,7 +145,7 @@ def print_summary(workflow, tasks: list | None = None) -> None:
                 icon = "[red]✗[/red]"
             else:
                 icon = "[yellow]○[/yellow]"
-            desc = t.prompt[:60] if t.prompt else "—"
+            desc = t.prompt[:120] if t.prompt else "—"
             lines.append(f"  {i}. {icon} {desc}")
         lines.append("")
 

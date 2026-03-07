@@ -147,20 +147,33 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
 
     @mcp.tool()
     def task_status(task_id: str) -> dict:
-        """Get the status and result of a task."""
+        """Get the status and result of a task.
+
+        Returns a lightweight payload while the task is running (status + error
+        only) to conserve tokens.  The full prompt and result are included only
+        once the task reaches a terminal state (completed / failed).
+        """
         task = manager.get_task(task_id)
         if task is None:
             return {"error": f"Task {task_id} not found"}
-        return {
+
+        # Always-present lightweight fields
+        response: dict = {
             "id": task.id,
             "agent_id": task.agent_id,
             "status": task.status,
-            "prompt": task.prompt,
-            "result": task.result,
-            "error": task.error,
-            "created_at": str(task.created_at),
-            "completed_at": str(task.completed_at) if task.completed_at else None,
         }
+
+        # Include full data only for terminal states to save context tokens
+        if task.status in ("completed", "failed"):
+            response["result"] = task.result
+            response["error"] = task.error
+            response["completed_at"] = str(task.completed_at) if task.completed_at else None
+        elif task.error:
+            # Surface errors even while running (e.g. retries)
+            response["error"] = task.error
+
+        return response
 
     @mcp.tool()
     def list_tasks(agent_id: str | None = None) -> list[dict]:
@@ -176,6 +189,39 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
             }
             for t in tasks
         ]
+
+    # --- Sub-agent progress reporting ---
+
+    @mcp.tool()
+    def report_progress(
+        agent_id: str,
+        task_id: str,
+        message: str,
+        phase: str = "working",
+    ) -> dict:
+        """Report progress from a sub-agent.  Sub-agents should call this
+        periodically so the Brain and CLI can show live status updates.
+
+        Args:
+            agent_id: The reporting agent's ID.
+            task_id: The task the agent is working on.
+            message: Short human-readable status line (< 120 chars).
+            phase: Current phase, e.g. "reading", "writing", "testing", "done".
+        """
+        event = {
+            "kind": "agent_progress",
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "message": message[:120],
+            "phase": phase,
+        }
+        # Broadcast to any registered progress listeners
+        for cb in manager._progress_listeners:
+            try:
+                cb(event)
+            except Exception:
+                pass
+        return {"ok": True}
 
     # --- Workflow tools ---
 
@@ -193,11 +239,46 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         }
 
     @mcp.tool()
-    def workflow_status(workflow_id: str) -> dict:
-        """Get workflow status and its subtask statuses."""
+    def workflow_status(workflow_id: str, lightweight: bool = True) -> dict:
+        """Get workflow status and its subtask statuses.
+
+        Args:
+            workflow_id: The workflow to inspect.
+            lightweight: When True (default) returns only status counters and
+                IDs — dramatically reducing token usage during polling.  Set to
+                False to retrieve the full plan, prompt, result and per-subtask
+                detail (useful once the workflow is complete).
+        """
         workflow = manager.db.get_workflow(workflow_id)
         if workflow is None:
             return {"error": f"Workflow {workflow_id} not found"}
+
+        if lightweight:
+            # ---------- compact response ----------
+            counts: dict[str, int] = {}
+            failed_ids: list[str] = []
+            for tid in workflow.subtask_ids:
+                task = manager.get_task(tid)
+                if task:
+                    counts[task.status] = counts.get(task.status, 0) + 1
+                    if task.status == "failed":
+                        failed_ids.append(tid)
+            response: dict = {
+                "id": workflow.id,
+                "status": workflow.status.value,
+                "subtask_count": len(workflow.subtask_ids),
+                "subtask_status_counts": counts,
+            }
+            if failed_ids:
+                response["failed_task_ids"] = failed_ids
+            if workflow.error:
+                response["error"] = workflow.error
+            # Include result only when workflow is done
+            if workflow.status.value in ("completed", "failed") and workflow.result:
+                response["result"] = workflow.result
+            return response
+
+        # ---------- full response ----------
         subtasks = []
         for tid in workflow.subtask_ids:
             task = manager.get_task(tid)
@@ -206,8 +287,8 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
                     "id": task.id,
                     "agent_id": task.agent_id,
                     "status": task.status,
-                    "prompt": task.prompt[:100],
-                    "result": task.result[:200] if task.result else None,
+                    "prompt": task.prompt[:200],
+                    "result": task.result if task.result else None,
                     "error": task.error,
                 })
         return {

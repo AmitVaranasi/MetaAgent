@@ -341,9 +341,14 @@ def chat(ctx: click.Context) -> None:
         console.print()
         console.print("  [dim]Brain is thinking...[/dim]")
 
-        # Progress callback that fires events to the terminal
+        # Progress callback that fires events to the terminal.
+        # Registered as both the per-task callback and a global listener so
+        # sub-agent tool calls (tool_call, tool_result, agent_progress) are
+        # also displayed in real time.
         def on_progress(event: dict) -> None:
             print_progress(event)
+
+        mgr.add_progress_listener(on_progress)
 
         brain_prompt = (
             f"Workflow ID: {wf.id}\n\n"
@@ -425,7 +430,7 @@ def chat(ctx: click.Context) -> None:
                                     "kind": "subtask_running",
                                     "index": idx,
                                     "total": total,
-                                    "description": st.prompt[:60],
+                                    "description": st.prompt[:120],
                                     "agent_id": st.agent_id,
                                 })
                             if tid not in reported_done and st.status == "completed":
@@ -471,6 +476,7 @@ def chat(ctx: click.Context) -> None:
 
             # After inner loop: handle waiting_for_input or done
             if workflow_done:
+                mgr.remove_progress_listener(on_progress)
                 break
 
             t = mgr.get_task(brain_task_id)

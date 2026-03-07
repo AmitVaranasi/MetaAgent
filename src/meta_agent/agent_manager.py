@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import traceback
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,20 @@ class AgentManager:
         self._runners: dict[str, AgentRunner] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
+        # External listeners for live progress events (e.g. from report_progress MCP tool)
+        self._progress_listeners: list[Callable[[dict[str, Any]], None]] = []
+
+    def add_progress_listener(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Register a callback that receives all progress events (tool calls,
+        sub-agent status, etc.)."""
+        self._progress_listeners.append(callback)
+
+    def remove_progress_listener(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Unregister a previously added progress listener."""
+        try:
+            self._progress_listeners.remove(callback)
+        except ValueError:
+            pass
 
     def start(self) -> None:
         """Load agents from DB, start event loop in background thread."""
@@ -181,10 +196,22 @@ class AgentManager:
             with open(log_path, "a") as f:
                 f.write(f"{msg}\n")
 
+        def _combined_progress(event: dict[str, Any]) -> None:
+            self._fire_progress(on_progress, event)
+            for cb in self._progress_listeners:
+                try:
+                    cb(event)
+                except Exception:
+                    pass
+
         self._fire_progress(on_progress, {"kind": "status_change", "status": "running", "task_id": task.id})
 
         try:
-            result = await runner.resume_task(task, user_response, on_message=on_message)
+            result = await runner.resume_task(
+                task, user_response,
+                on_message=on_message,
+                on_progress=_combined_progress,
+            )
 
             # Check if Brain is asking more questions
             if task.workflow_id:
@@ -203,6 +230,7 @@ class AgentManager:
             task.status = "completed"
             task.result = result
             task.completed_at = datetime.now(timezone.utc)
+            self.db.save_task(task)
             with self._lock:
                 state = self._agents[agent_id]
                 state.status = AgentStatus.IDLE
@@ -210,14 +238,20 @@ class AgentManager:
             self._fire_progress(on_progress, {"kind": "task_completed", "task_id": task.id})
         except Exception as e:
             logger.exception("Resume task %s failed for agent %s", task.id, agent_id)
+            tb = traceback.format_exc()
+            error_ctx = runner.get_error_context()
+            rich_error = f"{e}\n--- context: {error_ctx}\n--- traceback (last 5 frames):\n"
+            tb_lines = tb.strip().splitlines()
+            rich_error += "\n".join(tb_lines[-10:])
             task.status = "failed"
-            task.error = str(e)
+            task.error = rich_error
             task.completed_at = datetime.now(timezone.utc)
+            self.db.save_task(task)
             with self._lock:
                 state = self._agents[agent_id]
                 state.status = AgentStatus.ERROR
-                state.error = str(e)
-            self._fire_progress(on_progress, {"kind": "task_failed", "task_id": task.id, "error": str(e)})
+                state.error = rich_error
+            self._fire_progress(on_progress, {"kind": "task_failed", "task_id": task.id, "error": rich_error})
         finally:
             self.db.save_task(task)
 
@@ -236,6 +270,15 @@ class AgentManager:
             with open(log_path, "a") as f:
                 f.write(f"{msg}\n")
 
+        # Merge per-task callback with global listeners so events reach both
+        def _combined_progress(event: dict[str, Any]) -> None:
+            self._fire_progress(on_progress, event)
+            for cb in self._progress_listeners:
+                try:
+                    cb(event)
+                except Exception:
+                    pass
+
         self._fire_progress(on_progress, {"kind": "status_change", "status": "running", "task_id": task.id})
 
         try:
@@ -244,7 +287,14 @@ class AgentManager:
                 ext_runner = ExternalModelRunner(state.config.model)
                 result = await ext_runner.run(task.prompt, state.config.system_prompt)
             else:
-                result = await runner.run_task(task, on_message=on_message)
+                result = await runner.run_task(
+                    task,
+                    on_message=on_message,
+                    on_progress=_combined_progress,
+                )
+
+            # Persist session_id immediately so resume works even if we crash later
+            self.db.save_task(task)
 
             # Check if the Brain set workflow to waiting_for_input
             if task.workflow_id:
@@ -263,6 +313,8 @@ class AgentManager:
             task.status = "completed"
             task.result = result
             task.completed_at = datetime.now(timezone.utc)
+            # Persist BEFORE firing callback so readers see consistent state
+            self.db.save_task(task)
             with self._lock:
                 state = self._agents[agent_id]
                 state.status = AgentStatus.IDLE
@@ -270,14 +322,21 @@ class AgentManager:
             self._fire_progress(on_progress, {"kind": "task_completed", "task_id": task.id})
         except Exception as e:
             logger.exception("Task %s failed for agent %s", task.id, agent_id)
+            # Build rich error with last tool call context and traceback
+            tb = traceback.format_exc()
+            error_ctx = runner.get_error_context()
+            rich_error = f"{e}\n--- context: {error_ctx}\n--- traceback (last 5 frames):\n"
+            tb_lines = tb.strip().splitlines()
+            rich_error += "\n".join(tb_lines[-10:])
             task.status = "failed"
-            task.error = str(e)
+            task.error = rich_error
             task.completed_at = datetime.now(timezone.utc)
+            self.db.save_task(task)
             with self._lock:
                 state = self._agents[agent_id]
                 state.status = AgentStatus.ERROR
-                state.error = str(e)
-            self._fire_progress(on_progress, {"kind": "task_failed", "task_id": task.id, "error": str(e)})
+                state.error = rich_error
+            self._fire_progress(on_progress, {"kind": "task_failed", "task_id": task.id, "error": rich_error})
             if (
                 state.config.auto_restart
                 and state.restart_count < state.config.max_restarts
