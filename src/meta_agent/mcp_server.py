@@ -55,14 +55,30 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         model: str = "claude-sonnet-4-5-20250929",
         agent_id: str | None = None,
         cwd: str | None = None,
+        permission_mode: str = "bypassPermissions",
+        max_turns: int = 50,
     ) -> dict:
-        """Create and register a new agent."""
+        """Create and register a new agent.
+
+        Args:
+            name: Display name for the agent.
+            system_prompt: System prompt that defines the agent's behavior.
+            description: Short description of the agent's purpose.
+            allowed_tools: List of tool names the agent can use.
+            model: Model identifier (e.g. claude-sonnet-4-5-20250929).
+            agent_id: Optional custom ID. Auto-generated if omitted.
+            cwd: Working directory for the agent.
+            permission_mode: Permission mode. Use "bypassPermissions" for automated agents.
+            max_turns: Maximum conversation turns before the agent stops.
+        """
         kwargs: dict = dict(
             name=name,
             system_prompt=system_prompt,
             description=description,
             model=model,
             cwd=cwd,
+            permission_mode=permission_mode,
+            max_turns=max_turns,
         )
         if allowed_tools is not None:
             kwargs["allowed_tools"] = allowed_tools
