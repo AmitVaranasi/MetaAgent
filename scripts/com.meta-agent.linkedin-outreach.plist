@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Label: Unique identifier for this LaunchAgent -->
+    <key>Label</key>
+    <string>com.meta-agent.linkedin-outreach</string>
+
+    <!-- Program Arguments: Command and arguments to execute -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>PYTHON_PATH_PLACEHOLDER</string>
+        <string>-m</string>
+        <string>meta_agent.linkedin_outreach</string>
+    </array>
+
+    <!-- Working Directory: Set to project root -->
+    <key>WorkingDirectory</key>
+    <string>PROJECT_PATH_PLACEHOLDER</string>
+
+    <!-- RunAtLoad: Start when user logs in -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive: Restart if the process crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- StandardOutPath: Redirect stdout to log file -->
+    <key>StandardOutPath</key>
+    <string>LOG_PATH_PLACEHOLDER/meta-agent-linkedin-outreach.log</string>
+
+    <!-- StandardErrorPath: Redirect stderr to log file -->
+    <key>StandardErrorPath</key>
+    <string>LOG_PATH_PLACEHOLDER/meta-agent-linkedin-outreach-error.log</string>
+
+    <!-- EnvironmentVariables: Set PATH to include common Python locations -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:ENV_PATH_PLACEHOLDER</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <!-- ProcessType: Run as background task -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Nice: Lower priority to avoid impacting system performance -->
+    <key>Nice</key>
+    <integer>1</integer>
+</dict>
+</plist>
