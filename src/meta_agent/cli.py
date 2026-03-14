@@ -311,19 +311,28 @@ def chat(ctx: click.Context) -> None:
     import time
 
     from .brain import BRAIN_AGENT_ID, get_brain_config
-    from .chat_ui import get_user_input, print_progress, print_summary, print_welcome
+    from .chat_ui import (
+        get_user_input,
+        print_help,
+        print_plan_mode_toggle,
+        print_progress,
+        print_summary,
+        print_welcome,
+    )
     from .models import Workflow
 
     mgr = _make_manager(ctx.obj["data_dir"])
 
+    plan_mode = False
+
     # Always re-register brain so config changes (e.g. permission_mode) take effect
-    brain_config = get_brain_config(["meta-agent", "mcp-server"])
+    brain_config = get_brain_config(["meta-agent", "mcp-server"], plan_mode=plan_mode)
     mgr.register_agent(brain_config)
 
-    print_welcome()
+    print_welcome(plan_mode=plan_mode)
 
     while True:
-        user_input = get_user_input()
+        user_input = get_user_input(plan_mode=plan_mode)
         if user_input is None:
             console.print("\nGoodbye!")
             break
@@ -334,12 +343,37 @@ def chat(ctx: click.Context) -> None:
             console.print("Goodbye!")
             break
 
+        # --- Slash command handling ---
+        if user_input.startswith("/"):
+            cmd = user_input.lower().split()[0]
+            if cmd == "/plan":
+                plan_mode = not plan_mode
+                brain_config = get_brain_config(
+                    ["meta-agent", "mcp-server"],
+                    plan_mode=plan_mode,
+                )
+                mgr.register_agent(brain_config)
+                print_plan_mode_toggle(plan_mode)
+            elif cmd == "/help":
+                print_help(plan_mode=plan_mode)
+            else:
+                console.print(f"  [red]Unknown command: {cmd}[/red]")
+                console.print("  Type '/help' for available commands.")
+            continue
+
+        # Re-register brain with current plan_mode before each task
+        brain_config = get_brain_config(["meta-agent", "mcp-server"], plan_mode=plan_mode)
+        mgr.register_agent(brain_config)
+
         # Create workflow
         wf = Workflow(prompt=user_input, brain_agent_id=BRAIN_AGENT_ID)
         mgr.db.save_workflow(wf)
 
         console.print()
-        console.print("  [dim]Brain is thinking...[/dim]")
+        if plan_mode:
+            console.print("  [dim]Brain is planning (will pause for approval)...[/dim]")
+        else:
+            console.print("  [dim]Brain is thinking...[/dim]")
 
         # Progress callback that fires events to the terminal.
         # Registered as both the per-task callback and a global listener so
@@ -490,7 +524,7 @@ def chat(ctx: click.Context) -> None:
                 console.print()
 
                 # Collect user's answer
-                answer = get_user_input()
+                answer = get_user_input(plan_mode=plan_mode)
                 if answer is None:
                     console.print("\nGoodbye!")
                     workflow_done = True
