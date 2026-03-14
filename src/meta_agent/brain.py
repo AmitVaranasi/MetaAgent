@@ -121,14 +121,50 @@ You will be resumed with the user's answer.
 - NEVER call: AskUserQuestion, EnterPlanMode, ExitPlanMode
 """
 
+BRAIN_PLAN_MODE_ADDENDUM = """\
 
-def get_brain_config(mcp_server_command: list[str] | None = None) -> AgentConfig:
+## PLAN MODE (ACTIVE)
+
+You are in PLAN MODE. This changes your behavior after Phase 2:
+
+After completing Phase 2 (PLAN), you MUST:
+1. Write the plan using `update_workflow(status="planning", plan="<your detailed plan>")`
+2. Then call `update_workflow(status="waiting_for_input")` to pause
+3. Output a clear summary of your plan for the user, formatted as:
+   - Numbered list of subtasks with model assignments and dependencies
+   - Estimated complexity (simple/medium/complex)
+   - Any assumptions you made
+4. End with: "Reply 'approve' to execute, 'reject' to cancel, or describe changes."
+5. STOP and wait for the user's response.
+
+When you are resumed with the user's response:
+- If the user says "approve", "yes", "go", "execute", or similar affirmative:
+  → Proceed to Phase 3 (EXECUTE) with the current plan
+- If the user says "reject", "cancel", "no", or similar negative:
+  → Call `update_workflow(status="completed", result="Plan rejected by user.")`
+  → STOP immediately
+- If the user provides modifications (e.g. "change step 2 to...", "add a step for...", \
+"use Haiku for step 3"):
+  → Revise the plan accordingly
+  → Present the revised plan the same way (numbered list, etc.)
+  → Call `update_workflow(status="waiting_for_input")` again to pause for re-approval
+  → STOP and wait again
+
+DO NOT proceed to Phase 3 until you receive explicit approval.
+"""
+
+
+def get_brain_config(
+    mcp_server_command: list[str] | None = None,
+    plan_mode: bool = False,
+) -> AgentConfig:
     """Return the Brain agent configuration.
 
     Args:
         mcp_server_command: Command to start the meta-agent MCP server,
             e.g. ["meta-agent", "mcp-server"]. If provided, the brain
             will be configured with this as its MCP server.
+        plan_mode: When True, Brain will stop after planning for user approval.
     """
     mcp_servers = {}
     if mcp_server_command:
@@ -137,11 +173,15 @@ def get_brain_config(mcp_server_command: list[str] | None = None) -> AgentConfig
             "args": mcp_server_command[1:],
         }
 
+    system_prompt = BRAIN_SYSTEM_PROMPT
+    if plan_mode:
+        system_prompt += BRAIN_PLAN_MODE_ADDENDUM
+
     return AgentConfig(
         id=BRAIN_AGENT_ID,
         name="Brain Agent",
         description="Opus-powered orchestrator that decomposes and delegates complex tasks",
-        system_prompt=BRAIN_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         allowed_tools=["Read", "Glob", "Grep"],
         disallowed_tools=["Write", "Edit", "Bash", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode"],
         model="claude-opus-4-6",

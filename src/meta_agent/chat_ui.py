@@ -11,17 +11,22 @@ from rich.text import Text
 console = Console()
 
 
-def print_welcome() -> None:
+def print_welcome(plan_mode: bool = False) -> None:
     """Print the welcome banner."""
     console.print()
     console.print("  [bold cyan]Meta-Agent Brain[/bold cyan]")
+    if plan_mode:
+        console.print("  [yellow][Plan Mode ON][/yellow] — Brain will present plans for approval before executing.")
     console.print("  Type your task and press Enter. Type 'exit' to quit.")
+    console.print("  Type '/help' for available commands.")
     console.print()
 
 
-def get_user_input() -> str | None:
+def get_user_input(plan_mode: bool = False) -> str | None:
     """Prompt for user input. Returns None on EOF/KeyboardInterrupt."""
     try:
+        if plan_mode:
+            return console.input("[bold green]You [yellow][plan][/yellow] > [/bold green]")
         return console.input("[bold green]You > [/bold green]")
     except (EOFError, KeyboardInterrupt):
         return None
@@ -171,6 +176,27 @@ def print_summary(workflow, tasks: list | None = None) -> None:
 
     console.print()
     console.print(Panel(body, title=title, border_style=border_style, padding=(1, 2)))
+    console.print()
+
+
+def print_plan_mode_toggle(enabled: bool) -> None:
+    """Print plan mode toggle confirmation."""
+    if enabled:
+        console.print("  [yellow]Plan mode ON[/yellow] — Brain will present plans for approval before executing.")
+    else:
+        console.print("  [dim]Plan mode OFF[/dim] — Brain will auto-execute (default behavior).")
+
+
+def print_help(plan_mode: bool = False) -> None:
+    """Print available slash commands."""
+    console.print()
+    console.print("  [bold]Available commands:[/bold]")
+    console.print()
+    mode_status = "[yellow]ON[/yellow]" if plan_mode else "[dim]OFF[/dim]"
+    console.print(f"  /plan      Toggle plan mode (currently {mode_status})")
+    console.print("             When on, Brain presents plans for approval before executing.")
+    console.print("  /help      Show this help message")
+    console.print("  exit       Exit the chat")
     console.print()
 
 
