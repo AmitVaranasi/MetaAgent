@@ -67,7 +67,7 @@ def api_create_agent():
         name=data["name"],
         system_prompt=data.get("system_prompt", "You are a helpful assistant."),
         allowed_tools=tools,
-        model=data.get("model", "claude-sonnet-4-5-20250929"),
+        model=data.get("model", "claude-sonnet-5"),
         description=data.get("description", ""),
     )
     state = _mgr().register_agent(config)

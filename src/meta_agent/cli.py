@@ -67,7 +67,7 @@ def list_agents(ctx: click.Context) -> None:
 @click.option("--name", required=True, help="Agent name")
 @click.option("--system-prompt", required=True, help="System prompt")
 @click.option("--tools", default="Read,Write,Edit,Bash,Glob,Grep", help="Comma-separated tool list (empty for none)")
-@click.option("--model", default="claude-sonnet-4-5-20250929", help="Model ID")
+@click.option("--model", default="claude-sonnet-5", help="Model ID")
 @click.option("--description", default="", help="Agent description")
 @click.option("--id", "agent_id", default=None, help="Custom agent ID")
 @click.option("--cwd", default=None, help="Working directory")

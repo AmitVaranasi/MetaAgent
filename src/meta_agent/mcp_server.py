@@ -70,7 +70,7 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
         system_prompt: str,
         description: str = "",
         allowed_tools: list[str] | None = None,
-        model: str = "claude-sonnet-4-5-20250929",
+        model: str = "claude-sonnet-5",
         agent_id: str | None = None,
         cwd: str | None = None,
         permission_mode: str = "bypassPermissions",
@@ -83,7 +83,7 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
             system_prompt: System prompt that defines the agent's behavior.
             description: Short description of the agent's purpose.
             allowed_tools: List of tool names the agent can use.
-            model: Model identifier (e.g. claude-sonnet-4-5-20250929).
+            model: Model identifier (e.g. claude-sonnet-5).
             agent_id: Optional custom ID. Auto-generated if omitted.
             cwd: Working directory for the agent.
             permission_mode: Permission mode. Use "bypassPermissions" for automated agents.

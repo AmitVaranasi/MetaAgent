@@ -7,7 +7,7 @@ def test_agent_config_defaults():
     cfg = AgentConfig(name="Test", system_prompt="Hello")
     assert cfg.name == "Test"
     assert len(cfg.id) == 8
-    assert cfg.model == "claude-sonnet-4-5-20250929"
+    assert cfg.model == "claude-sonnet-5"
     assert "Read" in cfg.allowed_tools
     assert cfg.max_turns == 50
     assert cfg.auto_restart is False

@@ -26,7 +26,7 @@ class AgentConfig(BaseModel):
         default_factory=lambda: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"]
     )
     disallowed_tools: list[str] = Field(default_factory=list)
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = "claude-sonnet-5"
     max_turns: int = 50
     max_budget_usd: float | None = None
     mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)

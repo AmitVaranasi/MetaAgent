@@ -16,7 +16,7 @@ def test_brain_config_defaults():
     config = get_brain_config()
     assert config.id == BRAIN_AGENT_ID
     assert config.name == "Brain Agent"
-    assert config.model == "claude-opus-4-6"
+    assert config.model == "claude-opus-5"
     assert config.max_turns == 200
     assert "Read" in config.allowed_tools
 
@@ -42,7 +42,7 @@ def test_brain_config_is_valid_agent_config():
     data = config.model_dump()
     restored = AgentConfig.model_validate(data)
     assert restored.id == BRAIN_AGENT_ID
-    assert restored.model == "claude-opus-4-6"
+    assert restored.model == "claude-opus-5"
     assert restored.use_meta_agent_mcp is True
     # The live server object must never end up in the persisted config.
     import json
@@ -62,7 +62,7 @@ def test_brain_workflow_submission(db, sample_config):
     mgr.register_agent(brain_config)
 
     assert mgr.get_agent(BRAIN_AGENT_ID) is not None
-    assert mgr.get_agent(BRAIN_AGENT_ID).config.model == "claude-opus-4-6"
+    assert mgr.get_agent(BRAIN_AGENT_ID).config.model == "claude-opus-5"
 
     # Create and save a workflow
     workflow = Workflow(prompt="Test task", brain_agent_id=BRAIN_AGENT_ID)

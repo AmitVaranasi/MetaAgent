@@ -163,14 +163,19 @@ meta-agent delete coder
 | `--name` | Agent display name | (required) |
 | `--system-prompt` | Instructions for the agent | (required) |
 | `--tools` | Comma-separated tool list | `Read,Write,Edit,Bash,Glob,Grep` |
-| `--model` | Claude model ID | `claude-sonnet-4-5-20250929` |
+| `--model` | Claude model ID | `claude-sonnet-5` |
 | `--id` | Custom agent ID | auto-generated |
 | `--description` | Agent description | empty |
 | `--cwd` | Working directory for the agent | current directory |
 
-## MCP Server (Claude Code Integration)
+## MCP Server
 
-Start the MCP server for use with Claude Code:
+The Brain does **not** use this. It runs the same tool surface in-process
+(`create_inprocess_mcp_server`), so the agents it creates share this process's
+`AgentManager`, event loop and database. The stdio server below exists to attach
+meta-agent to an *external* Claude Code session.
+
+Start the MCP server for use with an external Claude Code session:
 
 ```bash
 meta-agent mcp-server
@@ -203,6 +208,11 @@ This runs a [FastMCP](https://github.com/modelcontextprotocol/python-sdk) server
 | `submit_task` | Submit a prompt to an agent |
 | `task_status` | Get status and result of a task |
 | `list_tasks` | List tasks, optionally filtered by agent |
+| `report_progress` | Report live progress from a sub-agent |
+| `create_workflow` | Create a workflow record for orchestration |
+| `workflow_status` | Get workflow status and subtask statuses |
+| `update_workflow` | Update a workflow's state |
+| `list_workflows` | List all workflows |
 
 ## CLI Reference
 
@@ -217,6 +227,7 @@ Commands:
   brain       Submit a task to the Brain agent for automatic orchestration
   chat        Interactive chat with the Brain agent
   create      Create and register a new agent
+  dashboard   Serve the web dashboard (agents, tasks, Kanban board)
   delete      Delete an agent by ID
   init        Initialize the data directory and database
   list        List all registered agents
@@ -238,10 +249,11 @@ Agents are defined by an `AgentConfig` with these fields:
 | `description` | str | `""` | Human-readable description |
 | `system_prompt` | str | (required) | Instructions sent to the LLM |
 | `allowed_tools` | list[str] | `["Read","Glob","Grep","Bash","Edit","Write"]` | SDK tools the agent can use |
-| `model` | str | `claude-sonnet-4-5-20250929` | Claude model ID |
+| `model` | str | `claude-sonnet-5` | Claude model ID |
 | `max_turns` | int | `50` | Max conversation turns per task |
 | `max_budget_usd` | float \| None | `None` | Optional spending cap |
 | `mcp_servers` | dict | `{}` | External MCP servers the agent can access |
+| `use_meta_agent_mcp` | bool | `False` | Attach the in-process meta-agent MCP server at run time |
 | `permission_mode` | str | `"acceptEdits"` | SDK permission mode |
 | `cwd` | str \| None | `None` | Working directory |
 | `auto_restart` | bool | `False` | Auto-recover from errors |

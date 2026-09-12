@@ -85,8 +85,8 @@ Delete ALL created agents. Update workflow status="completed" with a clear resul
 ## Model Selection
 | Model | ID | Use For |
 |-------|----|---------|
-| Sonnet | claude-sonnet-4-5-20250929 | Coding, implementation, refactoring (DEFAULT) |
-| Haiku | claude-haiku-4-5-20251001 | Formatting, summaries, reviews, docs, linting |
+| Sonnet | claude-sonnet-5 | Coding, implementation, refactoring (DEFAULT) |
+| Haiku | claude-haiku-4-5 | Formatting, summaries, reviews, docs, linting |
 | Gemini | external:gemini:gemini-2.0-flash | Brainstorming, drafts (text-only, no tools) |
 
 Opus is NOT available as sub-agent. You ARE Opus.
@@ -177,7 +177,7 @@ def get_brain_config(plan_mode: bool = False) -> AgentConfig:
         system_prompt=system_prompt,
         allowed_tools=["Read", "Glob", "Grep"],
         disallowed_tools=["Write", "Edit", "Bash", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode"],
-        model="claude-opus-4-6",
+        model="claude-opus-5",
         max_turns=200,
         use_meta_agent_mcp=True,
         permission_mode="bypassPermissions",
