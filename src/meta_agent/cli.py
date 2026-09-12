@@ -191,6 +191,22 @@ def mcp_server(ctx: click.Context) -> None:
 
 
 @main.command()
+@click.option("--host", default="127.0.0.1", help="Bind address")
+@click.option("--port", default=5000, help="Port to serve on")
+@click.option("--debug", is_flag=True, help="Run Flask in debug mode")
+@click.pass_context
+def dashboard(ctx: click.Context, host: str, port: int, debug: bool) -> None:
+    """Serve the web dashboard (agents, tasks, Kanban board)."""
+    from .dashboard.app import create_app
+
+    mgr = _make_manager(ctx.obj["data_dir"])
+    app = create_app(mgr)
+    console.print(f"[green]Dashboard on http://{host}:{port}[/green]")
+    console.print(f"[dim]  Kanban: http://{host}:{port}/kanban/enhanced[/dim]")
+    app.run(host=host, port=port, debug=debug)
+
+
+@main.command()
 @click.argument("prompt")
 @click.option("--wait", is_flag=True, help="Wait for workflow completion")
 @click.pass_context
