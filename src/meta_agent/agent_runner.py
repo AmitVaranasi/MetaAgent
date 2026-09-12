@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import traceback
+from collections import deque
 from typing import Any, Callable
 
-from claude_agent_sdk import ClaudeAgentOptions, query
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+    query,
+)
 
 from .models import AgentConfig, Task
 
@@ -16,41 +25,78 @@ logger = logging.getLogger(__name__)
 # Type alias for the structured progress callback
 ProgressCallback = Callable[[dict[str, Any]], None] | None
 
+# How many stderr lines from the Claude CLI to keep for error reporting.
+STDERR_BUFFER_LINES = 50
 
-def _parse_sdk_message(message: Any, agent_id: str) -> dict[str, Any] | None:
-    """Extract a structured progress event from an SDK message.
+_PREVIEW_CHARS = 200
 
-    Returns a dict suitable for on_progress callbacks, or None if the message
-    is not interesting for observability.
+
+def _preview(value: Any) -> str | None:
+    """Render a tool input/output as a short single-line preview."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    text = " ".join(text.split())
+    if not text:
+        return None
+    return text[:_PREVIEW_CHARS]
+
+
+def parse_sdk_message(
+    message: Any,
+    agent_id: str,
+    tool_names: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract progress events from one SDK message.
+
+    The SDK yields dataclasses — ``AssistantMessage``, ``UserMessage``,
+    ``ResultMessage``. Tool use and tool results are content *blocks* inside
+    those messages, never messages of their own, so a single message can carry
+    several events (or none).
+
+    ``tool_names`` maps ``tool_use_id`` -> tool name. It is populated from
+    ``ToolUseBlock``s and read back when the matching ``ToolResultBlock``
+    arrives, since a result block carries only the id.
     """
-    msg_type = getattr(message, "type", None) or type(message).__name__
+    events: list[dict[str, Any]] = []
 
-    # Tool-use request (agent decided to call a tool)
-    if msg_type in ("tool_use", "ToolUseMessage") or hasattr(message, "tool_name"):
-        tool_name = getattr(message, "tool_name", None) or getattr(message, "name", None)
-        tool_input = getattr(message, "input", None) or getattr(message, "tool_input", None)
-        if tool_name:
-            return {
-                "kind": "tool_call",
-                "agent_id": agent_id,
-                "tool": tool_name,
-                "input_preview": str(tool_input)[:200] if tool_input else None,
-            }
+    if isinstance(message, AssistantMessage):
+        for block in message.content:
+            if isinstance(block, ToolUseBlock):
+                if tool_names is not None:
+                    tool_names[block.id] = block.name
+                events.append(
+                    {
+                        "kind": "tool_call",
+                        "agent_id": agent_id,
+                        "tool": block.name,
+                        "tool_use_id": block.id,
+                        "input_preview": _preview(block.input),
+                    }
+                )
 
-    # Tool result (tool finished executing)
-    if msg_type in ("tool_result", "ToolResultMessage") or hasattr(message, "tool_result"):
-        tool_name = getattr(message, "tool_name", None) or getattr(message, "name", None)
-        output = getattr(message, "tool_result", None) or getattr(message, "output", None)
-        is_error = getattr(message, "is_error", False)
-        return {
-            "kind": "tool_result",
-            "agent_id": agent_id,
-            "tool": tool_name,
-            "is_error": is_error,
-            "output_preview": str(output)[:200] if output else None,
-        }
+    elif isinstance(message, UserMessage):
+        content = message.content
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, ToolResultBlock):
+                    events.append(
+                        {
+                            "kind": "tool_result",
+                            "agent_id": agent_id,
+                            "tool": (tool_names or {}).get(block.tool_use_id),
+                            "tool_use_id": block.tool_use_id,
+                            "is_error": bool(block.is_error),
+                            "output_preview": _preview(block.content),
+                        }
+                    )
 
-    return None
+    return events
+
+
+def _assistant_text(message: AssistantMessage) -> str:
+    """Join the text blocks of an assistant message."""
+    return "".join(b.text for b in message.content if isinstance(b, TextBlock))
 
 
 class AgentRunner:
@@ -61,6 +107,11 @@ class AgentRunner:
         self._current_task: asyncio.Task[Any] | None = None
         # Track the last tool call for richer error context
         self.last_tool_call: str | None = None
+        # tool_use_id -> tool name, so a ToolResultBlock can be named
+        self._tool_names: dict[str, str] = {}
+        # The Claude CLI reports most startup failures ONLY on stderr — the SDK
+        # exception for them is the contentless "Command failed with exit code 1".
+        self._stderr: deque[str] = deque(maxlen=STDERR_BUFFER_LINES)
 
     def _build_options(self, resume_session_id: str | None = None) -> ClaudeAgentOptions:
         """Build SDK options, optionally resuming a previous session."""
@@ -72,6 +123,7 @@ class AgentRunner:
             max_turns=self.config.max_turns,
             permission_mode=self.config.permission_mode,
             cwd=self.config.cwd,
+            stderr=self._stderr.append,
         )
 
         if resume_session_id:
@@ -102,28 +154,30 @@ class AgentRunner:
                 on_message(message)
 
             # --- Emit structured progress events ---
-            if on_progress:
-                event = _parse_sdk_message(message, task.agent_id)
-                if event:
+            events = parse_sdk_message(message, task.agent_id, self._tool_names)
+            for event in events:
+                if event["kind"] == "tool_call":
+                    self.last_tool_call = event["tool"]
+                if on_progress:
                     event["task_id"] = task.id
                     try:
                         on_progress(event)
                     except Exception:
-                        pass
+                        logger.debug("Progress callback error", exc_info=True)
 
-            # Track last tool call for error context
-            tool_name = getattr(message, "tool_name", None) or getattr(message, "name", None)
-            if tool_name:
-                self.last_tool_call = tool_name
+            # ResultMessage carries the final answer; fall back to the last
+            # assistant turn's text if the run ends without one.
+            if isinstance(message, ResultMessage):
+                if message.result:
+                    result_text = message.result
+            elif isinstance(message, AssistantMessage):
+                text = _assistant_text(message)
+                if text:
+                    result_text = text
 
-            # Capture from ResultMessage.result (SDK final message)
-            if hasattr(message, "result") and getattr(message, "result", None):
-                result_text = message.result
-            # Fallback: capture from AssistantMessage.content
-            elif hasattr(message, "content") and getattr(message, "type", None) == "assistant":
-                result_text = message.content
-            if hasattr(message, "session_id"):
-                task.session_id = message.session_id
+            session_id = getattr(message, "session_id", None)
+            if session_id:
+                task.session_id = session_id
 
         return result_text
 
@@ -154,11 +208,20 @@ class AgentRunner:
         )
 
     def get_error_context(self) -> str:
-        """Return context about the last operation for richer error messages."""
-        parts = []
+        """Return context about the last operation for richer error messages.
+
+        Always names the model, because a CLI that rejects its own arguments
+        exits 1 with an empty stderr and an exception that says nothing.
+        """
+        parts = [f"model={self.config.model}"]
         if self.last_tool_call:
             parts.append(f"last_tool_call={self.last_tool_call}")
-        return "; ".join(parts) if parts else "no context"
+        stderr_tail = [line for line in self._stderr if line.strip()]
+        if stderr_tail:
+            parts.append("cli_stderr=" + " | ".join(stderr_tail[-10:]))
+        else:
+            parts.append("cli_stderr=<empty>")
+        return "; ".join(parts)
 
     async def cancel(self) -> None:
         """Cancel the currently running task."""

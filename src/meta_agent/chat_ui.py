@@ -70,7 +70,7 @@ def print_progress(event: dict) -> None:
     # --- Live tool call feed (new) ---
     elif kind == "tool_call":
         agent = event.get("agent_id", "?")
-        tool = event.get("tool", "?")
+        tool = event.get("tool") or "?"
         preview = event.get("input_preview", "")
         # Compact one-liner: "  ↳ agent:abc123 → Read(src/auth.py...)"
         line = f"    [dim]↳ {agent} → {tool}[/dim]"
@@ -79,7 +79,7 @@ def print_progress(event: dict) -> None:
         console.print(line)
     elif kind == "tool_result":
         agent = event.get("agent_id", "?")
-        tool = event.get("tool", "?")
+        tool = event.get("tool") or "?"
         is_error = event.get("is_error", False)
         if is_error:
             preview = event.get("output_preview", "")
