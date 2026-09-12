@@ -1,17 +1,37 @@
-"""FastMCP server exposing 10 tools for agent management."""
+"""The meta-agent MCP tool surface.
+
+The tools are declared once, closed over one AgentManager, and exposed two
+ways:
+
+* :func:`create_mcp_server` — a FastMCP stdio server, for attaching meta-agent
+  to an *external* Claude Code session.
+* :func:`create_inprocess_mcp_server` — an SDK in-process server. This is what
+  the Brain uses. Spawning the stdio server instead gave the Brain a second OS
+  process with its own Database and AgentManager, so sub-agents ran somewhere
+  the chat could not see and died when the Brain's session ended (ADR note in
+  docs/architecture-review.md).
+"""
 
 from __future__ import annotations
 
+import inspect
+import json
+import types as pytypes
+import typing
+from typing import Any, Callable
+
+from claude_agent_sdk import McpSdkServerConfig, SdkMcpTool, create_sdk_mcp_server
 from mcp.server.fastmcp import FastMCP
 
 from .agent_manager import AgentManager
 from .models import AgentConfig, Workflow
 
+MCP_SERVER_NAME = "meta-agent"
 
-def create_mcp_server(manager: AgentManager) -> FastMCP:
-    mcp = FastMCP("meta-agent")
 
-    @mcp.tool()
+def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
+    """Build the tool functions, closed over `manager`."""
+
     def list_agents() -> list[dict]:
         """List all registered agents with their status."""
         return [
@@ -26,7 +46,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
             for s in manager.list_agents()
         ]
 
-    @mcp.tool()
     def get_agent(agent_id: str) -> dict:
         """Get detailed information about an agent."""
         state = manager.get_agent(agent_id)
@@ -46,7 +65,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
             "started_at": str(state.started_at) if state.started_at else None,
         }
 
-    @mcp.tool()
     def create_agent(
         name: str,
         system_prompt: str,
@@ -88,14 +106,12 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         state = manager.register_agent(config)
         return {"id": state.config.id, "name": state.config.name, "status": state.status.value}
 
-    @mcp.tool()
     def delete_agent(agent_id: str) -> dict:
         """Delete an agent by ID."""
         if manager.unregister_agent(agent_id):
             return {"deleted": True, "agent_id": agent_id}
         return {"error": f"Agent {agent_id} not found"}
 
-    @mcp.tool()
     def start_agent(agent_id: str) -> dict:
         """Start an agent (set to idle, ready for tasks)."""
         from .models import AgentStatus
@@ -106,7 +122,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         state.status = AgentStatus.IDLE
         return {"id": agent_id, "status": state.status.value}
 
-    @mcp.tool()
     def stop_agent(agent_id: str) -> dict:
         """Stop an agent."""
         from .models import AgentStatus
@@ -122,12 +137,10 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         state.current_task_id = None
         return {"id": agent_id, "status": state.status.value}
 
-    @mcp.tool()
     def agent_logs(agent_id: str, lines: int = 100) -> str:
         """Get recent logs for an agent."""
         return manager.get_logs(agent_id, lines=lines)
 
-    @mcp.tool()
     def submit_task(
         agent_id: str,
         prompt: str,
@@ -145,7 +158,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         except ValueError as e:
             return {"error": str(e)}
 
-    @mcp.tool()
     def task_status(task_id: str) -> dict:
         """Get the status and result of a task.
 
@@ -175,7 +187,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
 
         return response
 
-    @mcp.tool()
     def list_tasks(agent_id: str | None = None) -> list[dict]:
         """List tasks, optionally filtered by agent ID."""
         tasks = manager.list_tasks(agent_id)
@@ -192,7 +203,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
 
     # --- Sub-agent progress reporting ---
 
-    @mcp.tool()
     def report_progress(
         agent_id: str,
         task_id: str,
@@ -225,7 +235,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
 
     # --- Workflow tools ---
 
-    @mcp.tool()
     def create_workflow(prompt: str) -> dict:
         """Create a new workflow record for brain orchestration."""
         from .brain import BRAIN_AGENT_ID
@@ -238,7 +247,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
             "prompt": workflow.prompt,
         }
 
-    @mcp.tool()
     def workflow_status(workflow_id: str, lightweight: bool = True) -> dict:
         """Get workflow status and its subtask statuses.
 
@@ -305,7 +313,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
             "completed_at": str(workflow.completed_at) if workflow.completed_at else None,
         }
 
-    @mcp.tool()
     def update_workflow(
         workflow_id: str,
         status: str | None = None,
@@ -339,7 +346,6 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
         manager.db.save_workflow(workflow)
         return {"id": workflow.id, "status": workflow.status.value}
 
-    @mcp.tool()
     def list_workflows() -> list[dict]:
         """List all workflows."""
         workflows = manager.db.list_workflows()
@@ -354,4 +360,106 @@ def create_mcp_server(manager: AgentManager) -> FastMCP:
             for w in workflows
         ]
 
+    return [
+        list_agents,
+        get_agent,
+        create_agent,
+        delete_agent,
+        start_agent,
+        stop_agent,
+        agent_logs,
+        submit_task,
+        task_status,
+        list_tasks,
+        report_progress,
+        create_workflow,
+        workflow_status,
+        update_workflow,
+        list_workflows,
+    ]
+
+
+# --- schema derivation -------------------------------------------------------
+
+_JSON_TYPES: dict[Any, str] = {str: "string", int: "integer", float: "number", bool: "boolean"}
+
+
+def _json_type(annotation: Any) -> dict[str, Any]:
+    """Map a parameter annotation to a JSON Schema fragment."""
+    if annotation in _JSON_TYPES:
+        return {"type": _JSON_TYPES[annotation]}
+
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, pytypes.UnionType):
+        variants = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(variants) == 1:
+            return _json_type(variants[0])
+        return {"anyOf": [_json_type(v) for v in variants]}
+    if origin is list:
+        args = typing.get_args(annotation)
+        return {"type": "array", "items": _json_type(args[0])} if args else {"type": "array"}
+    if origin is dict or annotation is dict:
+        return {"type": "object"}
+    if annotation is list:
+        return {"type": "array"}
+    return {"type": "string"}
+
+
+def _input_schema(fn: Callable[..., Any]) -> dict[str, Any]:
+    """Derive a JSON Schema from a tool function's signature.
+
+    Written out rather than handed to the SDK as a {name: type} dict, because
+    that shorthand marks every parameter required — most of these tools have
+    optional ones.
+    """
+    hints = typing.get_type_hints(fn)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, param in inspect.signature(fn).parameters.items():
+        properties[name] = _json_type(hints.get(name, str))
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def _as_sdk_tool(fn: Callable[..., Any]) -> SdkMcpTool[Any]:
+    """Adapt a tool function to the SDK's in-process tool protocol."""
+
+    async def handler(args: dict[str, Any]) -> dict[str, Any]:
+        result = fn(**args)
+        text = result if isinstance(result, str) else json.dumps(result, default=str)
+        return {"content": [{"type": "text", "text": text}]}
+
+    return SdkMcpTool(
+        name=fn.__name__,
+        description=inspect.getdoc(fn) or "",
+        input_schema=_input_schema(fn),
+        handler=handler,
+    )
+
+
+# --- the two transports ------------------------------------------------------
+
+
+def create_mcp_server(manager: AgentManager) -> FastMCP:
+    """A stdio MCP server, for attaching meta-agent to an external session."""
+    mcp = FastMCP(MCP_SERVER_NAME)
+    for fn in _tool_functions(manager):
+        mcp.tool()(fn)
     return mcp
+
+
+def create_inprocess_mcp_server(manager: AgentManager) -> McpSdkServerConfig:
+    """An in-process MCP server sharing this process's AgentManager.
+
+    Tool calls reach the same object graph as the caller, so sub-agents run on
+    the caller's event loop, report_progress reaches listeners that actually
+    exist, and there is no second Database to diverge from.
+    """
+    return create_sdk_mcp_server(
+        name=MCP_SERVER_NAME,
+        tools=[_as_sdk_tool(fn) for fn in _tool_functions(manager)],
+    )

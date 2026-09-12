@@ -32,6 +32,24 @@ class AgentManager:
         self._loop_thread: threading.Thread | None = None
         # External listeners for live progress events (e.g. from report_progress MCP tool)
         self._progress_listeners: list[Callable[[dict[str, Any]], None]] = []
+        # Built on first use; holds a live server object, so it is never persisted.
+        self._mcp_servers: dict[str, Any] | None = None
+
+    def mcp_servers_for(self, config: AgentConfig) -> dict[str, Any] | None:
+        """Return the MCP servers an agent should run with.
+
+        Agents that orchestrate (the Brain) get an in-process server bound to
+        THIS manager, so their tool calls reach this object graph rather than a
+        subprocess with its own Database and event loop.
+        """
+        if not config.use_meta_agent_mcp:
+            return None
+        if self._mcp_servers is None:
+            # Imported here: mcp_server imports AgentManager for typing.
+            from .mcp_server import MCP_SERVER_NAME, create_inprocess_mcp_server
+
+            self._mcp_servers = {MCP_SERVER_NAME: create_inprocess_mcp_server(self)}
+        return self._mcp_servers
 
     def add_progress_listener(self, callback: Callable[[dict[str, Any]], None]) -> None:
         """Register a callback that receives all progress events (tool calls,
@@ -114,7 +132,7 @@ class AgentManager:
         )
         self.db.save_task(task)
 
-        runner = AgentRunner(state.config)
+        runner = AgentRunner(state.config, mcp_servers=self.mcp_servers_for(state.config))
         with self._lock:
             self._runners[agent_id] = runner
             state.status = AgentStatus.RUNNING
@@ -158,7 +176,7 @@ class AgentManager:
         if state is None:
             raise ValueError(f"Agent {agent_id} not registered")
 
-        runner = AgentRunner(state.config)
+        runner = AgentRunner(state.config, mcp_servers=self.mcp_servers_for(state.config))
         with self._lock:
             self._runners[agent_id] = runner
             state.status = AgentStatus.RUNNING

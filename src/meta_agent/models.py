@@ -30,6 +30,9 @@ class AgentConfig(BaseModel):
     max_turns: int = 50
     max_budget_usd: float | None = None
     mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Attach the in-process meta-agent MCP server at run time. A flag, not
+    # a server instance, because AgentConfig is persisted as JSON.
+    use_meta_agent_mcp: bool = False
     permission_mode: str = "acceptEdits"
     cwd: str | None = None
     auto_restart: bool = False

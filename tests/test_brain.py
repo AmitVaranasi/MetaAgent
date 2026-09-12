@@ -18,15 +18,14 @@ def test_brain_config_defaults():
     assert config.name == "Brain Agent"
     assert config.model == "claude-opus-4-6"
     assert config.max_turns == 200
-    assert config.mcp_servers == {}
     assert "Read" in config.allowed_tools
 
 
-def test_brain_config_with_mcp_server():
-    config = get_brain_config(["meta-agent", "mcp-server"])
-    assert "meta-agent" in config.mcp_servers
-    assert config.mcp_servers["meta-agent"]["command"] == "meta-agent"
-    assert config.mcp_servers["meta-agent"]["args"] == ["mcp-server"]
+def test_brain_uses_the_inprocess_mcp_server_not_a_subprocess():
+    """Spawning `meta-agent mcp-server` gave the Brain its own AgentManager."""
+    config = get_brain_config()
+    assert config.use_meta_agent_mcp is True
+    assert config.mcp_servers == {}
 
 
 def test_brain_system_prompt_content():
@@ -37,13 +36,18 @@ def test_brain_system_prompt_content():
 
 
 def test_brain_config_is_valid_agent_config():
-    config = get_brain_config(["meta-agent", "mcp-server"])
+    config = get_brain_config()
     assert isinstance(config, AgentConfig)
     # Should serialize/deserialize cleanly
     data = config.model_dump()
     restored = AgentConfig.model_validate(data)
     assert restored.id == BRAIN_AGENT_ID
     assert restored.model == "claude-opus-4-6"
+    assert restored.use_meta_agent_mcp is True
+    # The live server object must never end up in the persisted config.
+    import json
+
+    json.dumps(data, default=str)
 
 
 def test_brain_workflow_submission(db, sample_config):

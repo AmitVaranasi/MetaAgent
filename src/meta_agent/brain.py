@@ -154,25 +154,18 @@ DO NOT proceed to Phase 3 until you receive explicit approval.
 """
 
 
-def get_brain_config(
-    mcp_server_command: list[str] | None = None,
-    plan_mode: bool = False,
-) -> AgentConfig:
+def get_brain_config(plan_mode: bool = False) -> AgentConfig:
     """Return the Brain agent configuration.
 
     Args:
-        mcp_server_command: Command to start the meta-agent MCP server,
-            e.g. ["meta-agent", "mcp-server"]. If provided, the brain
-            will be configured with this as its MCP server.
         plan_mode: When True, Brain will stop after planning for user approval.
-    """
-    mcp_servers = {}
-    if mcp_server_command:
-        mcp_servers["meta-agent"] = {
-            "command": mcp_server_command[0],
-            "args": mcp_server_command[1:],
-        }
 
+    The Brain always runs with the in-process meta-agent MCP server, so the
+    agents it creates live on the caller's event loop and share the caller's
+    Database. It used to spawn `meta-agent mcp-server` as a subprocess, which
+    gave it a private AgentManager: progress events went to listeners that did
+    not exist there, and sub-agents were killed when the Brain's session ended.
+    """
     system_prompt = BRAIN_SYSTEM_PROMPT
     if plan_mode:
         system_prompt += BRAIN_PLAN_MODE_ADDENDUM
@@ -186,7 +179,7 @@ def get_brain_config(
         disallowed_tools=["Write", "Edit", "Bash", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode"],
         model="claude-opus-4-6",
         max_turns=200,
-        mcp_servers=mcp_servers,
+        use_meta_agent_mcp=True,
         permission_mode="bypassPermissions",
         auto_restart=False,
     )

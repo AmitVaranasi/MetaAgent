@@ -102,8 +102,11 @@ def _assistant_text(message: AssistantMessage) -> str:
 class AgentRunner:
     """Executes a task using the Claude Agent SDK."""
 
-    def __init__(self, config: AgentConfig):
+    def __init__(self, config: AgentConfig, mcp_servers: dict[str, Any] | None = None):
         self.config = config
+        # Live MCP server configs, supplied per run. In-process SDK servers hold
+        # an object instance and so cannot travel in the persisted AgentConfig.
+        self.mcp_servers = mcp_servers
         self._current_task: asyncio.Task[Any] | None = None
         # Track the last tool call for richer error context
         self.last_tool_call: str | None = None
@@ -132,8 +135,9 @@ class AgentRunner:
         if self.config.max_budget_usd:
             options.max_budget_usd = self.config.max_budget_usd
 
-        if self.config.mcp_servers:
-            options.mcp_servers = self.config.mcp_servers
+        mcp_servers = self.mcp_servers or self.config.mcp_servers
+        if mcp_servers:
+            options.mcp_servers = mcp_servers
 
         return options
 

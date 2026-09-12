@@ -204,7 +204,7 @@ def brain(ctx: click.Context, prompt: str, wait: bool) -> None:
     mgr = _make_manager(ctx.obj["data_dir"])
 
     # Always re-register brain so config changes (e.g. permission_mode) take effect
-    brain_config = get_brain_config(["meta-agent", "mcp-server"])
+    brain_config = get_brain_config()
     mgr.register_agent(brain_config)
 
     # Create workflow
@@ -326,7 +326,7 @@ def chat(ctx: click.Context) -> None:
     plan_mode = False
 
     # Always re-register brain so config changes (e.g. permission_mode) take effect
-    brain_config = get_brain_config(["meta-agent", "mcp-server"], plan_mode=plan_mode)
+    brain_config = get_brain_config(plan_mode=plan_mode)
     mgr.register_agent(brain_config)
 
     print_welcome(plan_mode=plan_mode)
@@ -348,10 +348,7 @@ def chat(ctx: click.Context) -> None:
             cmd = user_input.lower().split()[0]
             if cmd == "/plan":
                 plan_mode = not plan_mode
-                brain_config = get_brain_config(
-                    ["meta-agent", "mcp-server"],
-                    plan_mode=plan_mode,
-                )
+                brain_config = get_brain_config(plan_mode=plan_mode)
                 mgr.register_agent(brain_config)
                 print_plan_mode_toggle(plan_mode)
             elif cmd == "/help":
@@ -362,7 +359,7 @@ def chat(ctx: click.Context) -> None:
             continue
 
         # Re-register brain with current plan_mode before each task
-        brain_config = get_brain_config(["meta-agent", "mcp-server"], plan_mode=plan_mode)
+        brain_config = get_brain_config(plan_mode=plan_mode)
         mgr.register_agent(brain_config)
 
         # Create workflow
