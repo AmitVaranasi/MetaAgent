@@ -161,29 +161,27 @@ def test_task_failed_event_fires_even_when_the_agent_was_deleted_mid_run(
     assert stored.completed_at is not None
 
 
-def test_task_for_an_already_deleted_agent_fails_legibly(
-    manager: AgentManager, agent_config: AgentConfig
-):
+@pytest.mark.asyncio
+async def test_task_for_an_already_deleted_agent_fails_legibly(manager: AgentManager):
     """Two stored failures read only `'00cd38ae'` — a bare KeyError on an agent
-    id, because the agent was gone before its task reached the event loop."""
-    manager.register_agent(agent_config)
-    release = threading.Event()
+    id, because the agent was gone before its task reached the event loop.
 
-    async def blocked_query(**kwargs):
-        release.wait(5.0)
-        return
-        yield  # make it an async generator
+    Driven directly rather than through submit_task: whether the deletion wins
+    that race is timing, and the guard is what is under test.
+    """
+    from meta_agent.agent_runner import AgentRunner
+    from meta_agent.models import Task
 
-    with patch("meta_agent.agent_runner.query", side_effect=blocked_query):
-        # Submit, then delete before the coroutine gets its turn on the loop.
-        task = manager.submit_task("mgr_test", "do something")
-        manager.unregister_agent("mgr_test")
-        release.set()
-        assert _wait_for(lambda: manager.get_task(task.id).status == "failed")
+    config = AgentConfig(id="gone01", name="Gone", system_prompt="x")
+    task = Task(agent_id="gone01", prompt="do something")
+    manager.db.save_task(task)
 
-    error = manager.get_task(task.id).error
-    assert "was deleted before its task could run" in error
-    assert not error.startswith("'mgr_test'")
+    await manager._execute_task("gone01", AgentRunner(config), task)
+
+    stored = manager.get_task(task.id)
+    assert stored.status == "failed"
+    assert "was deleted before its task could run" in stored.error
+    assert not stored.error.startswith("'gone01'")
 
 
 def test_failed_task_still_auto_restarts_a_surviving_agent(
