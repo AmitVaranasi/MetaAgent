@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import sys
 from pathlib import Path
 
@@ -22,6 +23,9 @@ def _make_manager(base_dir: str | None = None) -> AgentManager:
     db = Database(cfg.db_path)
     mgr = AgentManager(db, cfg.log_dir)
     mgr.start()
+    # Nothing used to call shutdown(), so every command left its loop thread
+    # running and any in-flight task died mid-write on interpreter exit.
+    atexit.register(mgr.shutdown)
     return mgr
 
 
@@ -236,6 +240,8 @@ def brain(ctx: click.Context, prompt: str, wait: bool) -> None:
     )
     try:
         task = mgr.submit_task(BRAIN_AGENT_ID, brain_prompt, workflow_id=workflow.id)
+        workflow.brain_task_id = task.id
+        mgr.db.save_workflow(workflow)
         console.print(
             f"[green]Workflow {workflow.id} created, brain task {task.id} submitted[/green]"
         )
@@ -417,6 +423,8 @@ def chat(ctx: click.Context) -> None:
             console.print(f"  [red]{e}[/red]")
             continue
 
+        wf.brain_task_id = task.id
+        mgr.db.save_workflow(wf)
         print_progress({"kind": "workflow_created", "workflow_id": wf.id})
 
         # Poll for progress, with resume loop for clarifying questions

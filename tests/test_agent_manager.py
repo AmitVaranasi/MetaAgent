@@ -79,10 +79,12 @@ def test_submit_task(manager: AgentManager, agent_config: AgentConfig):
 
     with patch("meta_agent.agent_runner.query", side_effect=fake_query):
         task = manager.submit_task("mgr_test", "do something")
-    assert task.status == "pending"
-    assert task.agent_id == "mgr_test"
-    # Give the background loop a moment to process
-    time.sleep(0.5)
+        assert task.status == "pending"
+        assert task.agent_id == "mgr_test"
+        # Wait for the real thing, inside the patch. A fixed sleep here let the
+        # patch exit while the task was still running, so the REAL SDK got
+        # called from the test suite.
+        assert _wait_for(lambda: manager.get_task(task.id).status == "completed")
 
 
 def test_get_logs_empty(manager: AgentManager):

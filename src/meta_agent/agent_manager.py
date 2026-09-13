@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +20,34 @@ from .external_runner import ExternalModelRunner
 from .models import AgentConfig, AgentState, AgentStatus, Task, WorkflowStatus
 
 ProgressCallback = Callable[[dict[str, Any]], None] | None
+
+# A task in one of these states is being worked on by SOME process.
+IN_FLIGHT_STATUSES = ("pending", "running")
+# waiting_for_input is deliberately excluded: it survives a restart on purpose,
+# because task.session_id lets a later process resume the conversation.
+
+ORPHANED_ERROR = (
+    "Orphaned: the process that owned this task exited before it finished "
+    "(pid {pid} is gone). Marked failed at startup."
+)
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """Whether a process id is still running.
+
+    Signal 0 performs the permission and existence checks without delivering a
+    signal. Pid reuse could in principle make a dead owner look alive; for a
+    local tool that is an acceptable trade against never reaping at all.
+    """
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    return True
 
 logger = logging.getLogger(__name__)
 
@@ -75,19 +105,67 @@ class AgentManager:
             pass
 
     def start(self) -> None:
-        """Load agents from DB, start event loop in background thread."""
+        """Load agents from DB, reap orphans, start the background event loop."""
         for config in self.db.list_agents():
             with self._lock:
                 self._agents[config.id] = AgentState(config=config)
+        self.reap_orphaned_tasks()
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
             target=self._loop.run_forever, daemon=True
         )
         self._loop_thread.start()
 
-    def shutdown(self) -> None:
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+    def reap_orphaned_tasks(self) -> list[str]:
+        """Fail tasks whose owning process is gone. Returns the task ids.
+
+        Nothing used to reconcile the store on startup, so a task left `pending`
+        or `running` by a crashed or killed process stayed that way forever —
+        13 such rows accumulated in the shipped database.
+
+        Only tasks whose `owner_pid` is dead are touched, so running this in one
+        process does not disturb tasks another live process is still working on
+        (every CLI command builds a manager, so that case is routine).
+        """
+        reaped: list[str] = []
+        for task in self.db.list_tasks():
+            if task.status not in IN_FLIGHT_STATUSES or _pid_alive(task.owner_pid):
+                continue
+            task.status = "failed"
+            task.error = ORPHANED_ERROR.format(pid=task.owner_pid)
+            task.completed_at = datetime.now(timezone.utc)
+            self.db.save_task(task)
+            self._fail_workflow_for(task)
+            reaped.append(task.id)
+        if reaped:
+            logger.info("Reaped %d orphaned task(s): %s", len(reaped), ", ".join(reaped))
+        return reaped
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Cancel in-flight runs, let them record, then stop the loop.
+
+        This used to call loop.stop() and return, so tasks died mid-write and
+        their rows were left in whatever state they happened to be in.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+        with self._lock:
+            runners = [run.runner for run in self._runs.values()]
+        for runner in runners:
+            asyncio.run_coroutine_threadsafe(runner.cancel(), loop)
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._runs:
+                    break
+            time.sleep(0.02)
+
+        loop.call_soon_threadsafe(loop.stop)
+        if self._loop_thread is not None:
+            self._loop_thread.join(timeout=2.0)
+        self._loop = None
 
     # --- Agent CRUD ---
 
@@ -155,6 +233,7 @@ class AgentManager:
             created_at=datetime.now(timezone.utc),
             workflow_id=workflow_id,
             parent_task_id=parent_task_id,
+            owner_pid=os.getpid(),
         )
         self.db.save_task(task)
 
@@ -202,6 +281,7 @@ class AgentManager:
         self._start_run(agent_id, task.id, runner)
 
         task.status = "running"
+        task.owner_pid = os.getpid()
         self.db.save_task(task)
 
         # Reset workflow status so stale waiting_for_input doesn't re-trigger
@@ -266,6 +346,34 @@ class AgentManager:
                     state.error = None
             return state
 
+    def _fail_workflow_for(self, task: Task, error: str | None = None) -> None:
+        """Fail the workflow this task was orchestrating, if it was.
+
+        WorkflowStatus.FAILED existed but only the Brain could ever set it, via
+        the update_workflow tool — so a workflow could only be failed by the
+        very agent whose death is the usual reason it needs failing. 21 of 33
+        workflows in the shipped database are stranded in planning / executing /
+        assembling for exactly that reason.
+
+        Only the workflow's OWN brain task fails it. A subtask failing is
+        recoverable — Phase 4 tells the Brain to retry with an adjusted prompt —
+        so it must not tear the workflow down.
+        """
+        if not task.workflow_id:
+            return
+        wf = self.db.get_workflow(task.workflow_id)
+        if wf is None:
+            return
+        if wf.status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED):
+            return
+        is_brain_task = task.id == wf.brain_task_id or task.agent_id == wf.brain_agent_id
+        if not is_brain_task:
+            return
+        wf.status = WorkflowStatus.FAILED
+        wf.error = error or task.error or "The orchestrating task ended without completing."
+        wf.completed_at = datetime.now(timezone.utc)
+        self.db.save_workflow(wf)
+
     def _mark_running(self, task: Task, on_progress: ProgressCallback) -> None:
         """Persist the running status so readers outside this process see it."""
         task.status = "running"
@@ -291,6 +399,7 @@ class AgentManager:
         task.error = rich_error
         task.completed_at = datetime.now(timezone.utc)
         self.db.save_task(task)
+        self._fail_workflow_for(task)
         state = self._end_run(agent_id, task.id, AgentStatus.ERROR, error=rich_error)
         self._fire_progress(
             on_progress, {"kind": "task_failed", "task_id": task.id, "error": rich_error}
@@ -371,6 +480,7 @@ class AgentManager:
             task.status = "cancelled"
             task.completed_at = datetime.now(timezone.utc)
             self.db.save_task(task)
+            self._fail_workflow_for(task, error="The orchestrating task was cancelled.")
             self._end_run(agent_id, task.id, AgentStatus.STOPPED)
             self._fire_progress(on_progress, {"kind": "task_cancelled", "task_id": task.id})
             raise
@@ -414,6 +524,7 @@ class AgentManager:
             task.status = "cancelled"
             task.completed_at = datetime.now(timezone.utc)
             self.db.save_task(task)
+            self._fail_workflow_for(task, error="The orchestrating task was cancelled.")
             self._end_run(agent_id, task.id, AgentStatus.STOPPED)
             self._fire_progress(on_progress, {"kind": "task_cancelled", "task_id": task.id})
             raise

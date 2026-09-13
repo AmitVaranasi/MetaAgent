@@ -65,6 +65,9 @@ class Task(BaseModel):
     session_id: str | None = None
     workflow_id: str | None = None
     parent_task_id: str | None = None
+    # PID of the process that started this task, so a later process can tell an
+    # orphan (owner gone) from a task another live process is still running.
+    owner_pid: int | None = None
 
 
 class WorkflowStatus(str, Enum):

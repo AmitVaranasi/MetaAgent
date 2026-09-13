@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS workflows (
 _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN workflow_id TEXT",
     "ALTER TABLE tasks ADD COLUMN parent_task_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN owner_pid INTEGER",
 ]
 
 
@@ -142,8 +143,9 @@ class Database:
         self._conn.execute(
             """INSERT OR REPLACE INTO tasks
                (id, agent_id, status, prompt, messages_json, result, error,
-                session_id, created_at, completed_at, workflow_id, parent_task_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                session_id, created_at, completed_at, workflow_id, parent_task_id,
+                owner_pid)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.agent_id,
@@ -157,6 +159,7 @@ class Database:
                 task.completed_at.isoformat() if task.completed_at else None,
                 task.workflow_id,
                 task.parent_task_id,
+                task.owner_pid,
             ),
         )
         self._conn.commit()
@@ -199,6 +202,7 @@ class Database:
             ),
             workflow_id=row["workflow_id"],
             parent_task_id=row["parent_task_id"],
+            owner_pid=row["owner_pid"],
         )
 
     # --- Workflow CRUD ---
