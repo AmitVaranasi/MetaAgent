@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from claude_agent_sdk import (
@@ -29,6 +30,37 @@ ProgressCallback = Callable[[dict[str, Any]], None] | None
 STDERR_BUFFER_LINES = 50
 
 _PREVIEW_CHARS = 200
+
+
+@dataclass
+class RunStats:
+    """What a run cost, read off the SDK's final ResultMessage.
+
+    The SDK reports all of this on every run and the system used to discard it,
+    so there was no way to answer what a workflow cost or whether delegating to
+    cheaper sub-agents actually saved anything.
+    """
+
+    cost_usd: float | None = None
+    num_turns: int | None = None
+    stop_reason: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+class AgentRunError(RuntimeError):
+    """The SDK ended a run with is_error set.
+
+    Most commonly `error_max_turns`: the run hit max_turns and stopped. That
+    used to end the async-for normally, so the task was stored `completed` with
+    whatever partial text it had and the Brain assembled on truncated work.
+    """
+
+    def __init__(self, subtype: str, stop_reason: str | None = None, partial_result: str = ""):
+        self.subtype = subtype
+        self.stop_reason = stop_reason
+        self.partial_result = partial_result
+        detail = f" (stop_reason={stop_reason})" if stop_reason else ""
+        super().__init__(f"The run ended with error subtype {subtype!r}{detail}")
 
 
 def _preview(value: Any) -> str | None:
@@ -115,6 +147,8 @@ class AgentRunner:
         # The Claude CLI reports most startup failures ONLY on stderr — the SDK
         # exception for them is the contentless "Command failed with exit code 1".
         self._stderr: deque[str] = deque(maxlen=STDERR_BUFFER_LINES)
+        # Populated from the final ResultMessage, on success and on failure.
+        self.stats = RunStats()
 
     def _build_options(self, resume_session_id: str | None = None) -> ClaudeAgentOptions:
         """Build SDK options, optionally resuming a previous session."""
@@ -156,6 +190,7 @@ class AgentRunner:
         options = self._build_options(resume_session_id=resume_session_id)
 
         result_text = ""
+        failed_result: ResultMessage | None = None
         async for message in query(prompt=prompt, options=options):
             if on_message:
                 on_message(message)
@@ -175,8 +210,16 @@ class AgentRunner:
             # ResultMessage carries the final answer; fall back to the last
             # assistant turn's text if the run ends without one.
             if isinstance(message, ResultMessage):
+                self.stats = RunStats(
+                    cost_usd=message.total_cost_usd,
+                    num_turns=message.num_turns,
+                    stop_reason=message.stop_reason,
+                    usage=message.usage or {},
+                )
                 if message.result:
                     result_text = message.result
+                if message.is_error:
+                    failed_result = message
             elif isinstance(message, AssistantMessage):
                 text = _assistant_text(message)
                 if text:
@@ -185,6 +228,13 @@ class AgentRunner:
             session_id = getattr(message, "session_id", None)
             if session_id:
                 task.session_id = session_id
+
+        if failed_result is not None:
+            raise AgentRunError(
+                failed_result.subtype,
+                stop_reason=failed_result.stop_reason,
+                partial_result=result_text,
+            )
 
         return result_text
 
@@ -221,6 +271,10 @@ class AgentRunner:
         exits 1 with an empty stderr and an exception that says nothing.
         """
         parts = [f"model={self.config.model}"]
+        if self.stats.num_turns is not None:
+            parts.append(f"turns={self.stats.num_turns}")
+        if self.stats.cost_usd is not None:
+            parts.append(f"cost_usd={self.stats.cost_usd:.4f}")
         if self.last_tool_call:
             parts.append(f"last_tool_call={self.last_tool_call}")
         stderr_tail = [line for line in self._stderr if line.strip()]

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .agent_runner import AgentRunner
+from .agent_runner import AgentRunError, AgentRunner
 from .db import Database
 from .external_runner import ExternalModelRunner
 from .models import AgentConfig, AgentState, AgentStatus, Task, WorkflowStatus
@@ -234,6 +234,7 @@ class AgentManager:
             workflow_id=workflow_id,
             parent_task_id=parent_task_id,
             owner_pid=os.getpid(),
+            model=state.config.model,
         )
         self.db.save_task(task)
 
@@ -374,6 +375,41 @@ class AgentManager:
         wf.completed_at = datetime.now(timezone.utc)
         self.db.save_workflow(wf)
 
+    @staticmethod
+    def _apply_stats(task: Task, runner: AgentRunner) -> None:
+        """Copy what the run cost onto the task, whether it succeeded or not."""
+        stats = runner.stats
+        task.cost_usd = stats.cost_usd
+        task.num_turns = stats.num_turns
+        task.stop_reason = stats.stop_reason
+        task.usage = stats.usage
+
+    def workflow_usage(self, workflow_id: str) -> dict[str, Any]:
+        """What a workflow has cost so far, in total and per model.
+
+        The per-model split is the number that answers the question the whole
+        design rests on: whether delegating to cheaper sub-agents beats doing
+        the work in one expensive session.
+        """
+        tasks = self.db.list_workflow_tasks(workflow_id)
+        by_model: dict[str, dict[str, Any]] = {}
+        totals = {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "num_turns": 0}
+        for task in tasks:
+            model = task.model or "unknown"
+            bucket = by_model.setdefault(
+                model,
+                {"tasks": 0, "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0},
+            )
+            bucket["tasks"] += 1
+            bucket["cost_usd"] += task.cost_usd or 0.0
+            totals["cost_usd"] += task.cost_usd or 0.0
+            totals["num_turns"] += task.num_turns or 0
+            for field in ("input_tokens", "output_tokens"):
+                value = task.usage.get(field, 0) or 0
+                bucket[field] += value
+                totals[field] += value
+        return {"task_count": len(tasks), "totals": totals, "by_model": by_model}
+
     def _mark_running(self, task: Task, on_progress: ProgressCallback) -> None:
         """Persist the running status so readers outside this process see it."""
         task.status = "running"
@@ -391,6 +427,10 @@ class AgentManager:
         on_progress: ProgressCallback,
     ) -> AgentState | None:
         """Persist a task failure with rich context. Returns the agent state, if any."""
+        self._apply_stats(task, runner)
+        if isinstance(exc, AgentRunError) and exc.partial_result:
+            # Keep the partial work — a max_turns stop still produced something.
+            task.result = exc.partial_result
         tb = traceback.format_exc()
         error_ctx = runner.get_error_context()
         rich_error = f"{exc}\n--- context: {error_ctx}\n--- traceback (last 10 frames):\n"
@@ -436,8 +476,11 @@ class AgentManager:
         task: Task,
         result: str,
         on_progress: ProgressCallback,
+        runner: AgentRunner | None = None,
     ) -> None:
         """Complete a task, or park it if the Brain asked the user a question."""
+        if runner is not None:
+            self._apply_stats(task, runner)
         if task.workflow_id:
             wf = self.db.get_workflow(task.workflow_id)
             if wf and wf.status == WorkflowStatus.WAITING_FOR_INPUT:
@@ -472,7 +515,7 @@ class AgentManager:
                 on_message=self._open_log(agent_id),
                 on_progress=self._combined_progress(on_progress),
             )
-            self._finish_or_pause(agent_id, task, result, on_progress)
+            self._finish_or_pause(agent_id, task, result, on_progress, runner)
         except asyncio.CancelledError:
             # stop_agent / unregister_agent reached this task. Record it as
             # cancelled rather than leaving it mid-flight, then let the
@@ -516,7 +559,7 @@ class AgentManager:
 
             # Persist session_id immediately so resume works even if we crash later
             self.db.save_task(task)
-            self._finish_or_pause(agent_id, task, result, on_progress)
+            self._finish_or_pause(agent_id, task, result, on_progress, runner)
         except asyncio.CancelledError:
             # stop_agent / unregister_agent reached this task. Record it as
             # cancelled rather than leaving it mid-flight, then let the

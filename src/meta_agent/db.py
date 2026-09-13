@@ -49,6 +49,11 @@ _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN workflow_id TEXT",
     "ALTER TABLE tasks ADD COLUMN parent_task_id TEXT",
     "ALTER TABLE tasks ADD COLUMN owner_pid INTEGER",
+    "ALTER TABLE tasks ADD COLUMN model TEXT",
+    "ALTER TABLE tasks ADD COLUMN cost_usd REAL",
+    "ALTER TABLE tasks ADD COLUMN num_turns INTEGER",
+    "ALTER TABLE tasks ADD COLUMN stop_reason TEXT",
+    "ALTER TABLE tasks ADD COLUMN usage_json TEXT",
 ]
 
 
@@ -144,8 +149,8 @@ class Database:
             """INSERT OR REPLACE INTO tasks
                (id, agent_id, status, prompt, messages_json, result, error,
                 session_id, created_at, completed_at, workflow_id, parent_task_id,
-                owner_pid)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                owner_pid, model, cost_usd, num_turns, stop_reason, usage_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.agent_id,
@@ -160,6 +165,11 @@ class Database:
                 task.workflow_id,
                 task.parent_task_id,
                 task.owner_pid,
+                task.model,
+                task.cost_usd,
+                task.num_turns,
+                task.stop_reason,
+                json.dumps(task.usage),
             ),
         )
         self._conn.commit()
@@ -184,6 +194,18 @@ class Database:
             ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
+    def list_workflow_tasks(self, workflow_id: str) -> list[Task]:
+        """Every task belonging to a workflow.
+
+        Authoritative, unlike Workflow.subtask_ids, which only holds what the
+        Brain remembered to register via update_workflow(add_subtask_id=...).
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at",
+            (workflow_id,),
+        ).fetchall()
+        return [self._row_to_task(r) for r in rows]
+
     def _row_to_task(self, row: sqlite3.Row) -> Task:
         return Task(
             id=row["id"],
@@ -203,6 +225,11 @@ class Database:
             workflow_id=row["workflow_id"],
             parent_task_id=row["parent_task_id"],
             owner_pid=row["owner_pid"],
+            model=row["model"],
+            cost_usd=row["cost_usd"],
+            num_turns=row["num_turns"],
+            stop_reason=row["stop_reason"],
+            usage=json.loads(row["usage_json"]) if row["usage_json"] else {},
         )
 
     # --- Workflow CRUD ---

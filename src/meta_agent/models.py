@@ -69,6 +69,16 @@ class Task(BaseModel):
     # orphan (owner gone) from a task another live process is still running.
     owner_pid: int | None = None
 
+    # --- what the run actually cost, from the SDK's ResultMessage ---
+    # Recorded per task and summed per workflow. The model is stored here rather
+    # than looked up from the agent, because the Brain deletes its agents when
+    # it is done (Phase 6) and the spend has to outlive them.
+    model: str | None = None
+    cost_usd: float | None = None
+    num_turns: int | None = None
+    stop_reason: str | None = None
+    usage: dict[str, Any] = Field(default_factory=dict)
+
 
 class WorkflowStatus(str, Enum):
     PLANNING = "planning"

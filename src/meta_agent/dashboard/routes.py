@@ -120,6 +120,9 @@ def api_list_tasks():
             "error": t.error,
             "created_at": str(t.created_at),
             "completed_at": str(t.completed_at) if t.completed_at else None,
+            "model": t.model,
+            "cost_usd": t.cost_usd,
+            "num_turns": t.num_turns,
         }
         for t in tasks
     ])
@@ -170,6 +173,14 @@ def api_list_workflows():
         }
         for w in workflows
     ])
+
+
+@bp.route("/api/workflows/<workflow_id>/usage")
+def api_workflow_usage(workflow_id: str):
+    """Cost totals and the per-model breakdown for one workflow."""
+    if _mgr().db.get_workflow(workflow_id) is None:
+        return jsonify({"error": f"Workflow {workflow_id} not found"}), 404
+    return jsonify(_mgr().workflow_usage(workflow_id))
 
 
 @bp.route("/api/workflows", methods=["POST"])

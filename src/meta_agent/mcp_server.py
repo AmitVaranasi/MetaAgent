@@ -175,10 +175,13 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
         }
 
         # Include full data only for terminal states to save context tokens
-        if task.status in ("completed", "failed"):
+        if task.status in ("completed", "failed", "cancelled"):
             response["result"] = task.result
             response["error"] = task.error
             response["completed_at"] = str(task.completed_at) if task.completed_at else None
+            response["cost_usd"] = task.cost_usd
+            response["num_turns"] = task.num_turns
+            response["stop_reason"] = task.stop_reason
         elif task.error:
             # Surface errors even while running (e.g. retries)
             response["error"] = task.error
@@ -279,6 +282,9 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
                 response["failed_task_ids"] = failed_ids
             if workflow.error:
                 response["error"] = workflow.error
+            response["cost_usd"] = round(
+                manager.workflow_usage(workflow_id)["totals"]["cost_usd"], 4
+            )
             # Include result only when workflow is done
             if workflow.status.value in ("completed", "failed") and workflow.result:
                 response["result"] = workflow.result
@@ -301,6 +307,7 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
             "id": workflow.id,
             "prompt": workflow.prompt,
             "plan": workflow.plan,
+            "usage": manager.workflow_usage(workflow_id),
             "status": workflow.status.value,
             "brain_agent_id": workflow.brain_agent_id,
             "brain_task_id": workflow.brain_task_id,
@@ -344,6 +351,14 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
         manager.db.save_workflow(workflow)
         return {"id": workflow.id, "status": workflow.status.value}
 
+    def workflow_usage(workflow_id: str) -> dict:
+        """What a workflow has cost so far: totals and a per-model breakdown.
+
+        Use it to decide whether to keep delegating or stop early, and to report
+        the cost of the work in your final summary.
+        """
+        return manager.workflow_usage(workflow_id)
+
     def list_workflows() -> list[dict]:
         """List all workflows."""
         workflows = manager.db.list_workflows()
@@ -373,6 +388,7 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
         create_workflow,
         workflow_status,
         update_workflow,
+        workflow_usage,
         list_workflows,
     ]
 

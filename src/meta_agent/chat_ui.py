@@ -127,12 +127,14 @@ def print_progress(event: dict) -> None:
         console.print(f"  [dim]{msg}[/dim]")
 
 
-def print_summary(workflow, tasks: list | None = None) -> None:
+def print_summary(workflow, tasks: list | None = None, usage: dict | None = None) -> None:
     """Print a rich summary panel for a completed workflow.
 
     Args:
         workflow: A Workflow model instance.
         tasks: Optional list of Task objects for subtask details.
+        usage: Optional AgentManager.workflow_usage() result — cost totals and
+            the per-model breakdown.
     """
     lines: list[str] = []
 
@@ -160,6 +162,23 @@ def print_summary(workflow, tasks: list | None = None) -> None:
         if len(result_text) > 500:
             result_text = result_text[:500] + "..."
         lines.append(f"  {result_text}")
+        lines.append("")
+
+    if usage and usage["totals"]["cost_usd"]:
+        lines.append("[bold]Cost:[/bold]")
+        totals = usage["totals"]
+        lines.append(
+            f"  ${totals['cost_usd']:.4f} total"
+            f" · {totals['input_tokens']:,} in / {totals['output_tokens']:,} out tokens"
+            f" · {totals['num_turns']} turns"
+        )
+        for model, bucket in sorted(
+            usage["by_model"].items(), key=lambda kv: -kv[1]["cost_usd"]
+        ):
+            lines.append(
+                f"    {model}: ${bucket['cost_usd']:.4f}"
+                f" over {bucket['tasks']} task(s)"
+            )
         lines.append("")
 
     # Timing and stats

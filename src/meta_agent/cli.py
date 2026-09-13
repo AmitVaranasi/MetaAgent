@@ -519,7 +519,9 @@ def chat(ctx: click.Context) -> None:
                             st = mgr.get_task(tid)
                             if st:
                                 subtask_objs.append(st)
-                        print_summary(final_wf, subtask_objs)
+                        print_summary(
+                            final_wf, subtask_objs, mgr.workflow_usage(wf.id)
+                        )
                     elif t.status == "completed":
                         console.print(f"\n  [green]Done.[/green]")
                         if t.result:
