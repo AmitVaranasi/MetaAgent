@@ -153,3 +153,42 @@ def test_get_logs_still_reads_what_the_sink_wrote(
     sink("second line")
     text = manager.get_logs("life")
     assert "first line" in text and "second line" in text
+
+
+# --- working directory ---
+
+
+def test_an_agent_without_a_cwd_inherits_the_managers_default(db: Database, config, tmp_path):
+    """Observed live: a sub-agent created with cwd=None ran in the launching
+    process's directory and overwrote that repo's README.md."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    mgr = AgentManager(db, config.log_dir, default_cwd=str(workspace))
+    mgr.start()
+    try:
+        state = mgr.register_agent(
+            AgentConfig(id="sub", name="Sub", system_prompt="x", allowed_tools=[])
+        )
+        assert state.config.cwd == str(workspace)
+        assert mgr.db.get_agent("sub").cwd == str(workspace)
+    finally:
+        mgr.shutdown()
+
+
+def test_an_explicit_cwd_is_never_overridden(db: Database, config, tmp_path):
+    mgr = AgentManager(db, config.log_dir, default_cwd=str(tmp_path / "default"))
+    mgr.start()
+    try:
+        state = mgr.register_agent(
+            AgentConfig(id="sub", name="Sub", system_prompt="x", allowed_tools=[], cwd="/explicit")
+        )
+        assert state.config.cwd == "/explicit"
+    finally:
+        mgr.shutdown()
+
+
+def test_without_a_default_the_cwd_stays_none(manager: AgentManager):
+    state = manager.register_agent(
+        AgentConfig(id="sub", name="Sub", system_prompt="x", allowed_tools=[])
+    )
+    assert state.config.cwd is None

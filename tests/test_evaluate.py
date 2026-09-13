@@ -53,11 +53,12 @@ TASKS = [
 # --- task loading ---
 
 
-def test_load_tasks_reads_the_shipped_set():
-    tasks = load_tasks(Path("evals/tasks.json"))
-    assert len(tasks) >= 5
+@pytest.mark.parametrize("name", ["tasks.json", "tasks-readonly.json"])
+def test_the_shipped_task_sets_load(name: str):
+    tasks = load_tasks(Path("evals") / name)
+    assert len(tasks) >= 4
     assert all(t.id and t.prompt for t in tasks)
-    assert any(t.expect for t in tasks)
+    assert all(t.expect for t in tasks)
 
 
 def test_load_tasks_from_a_file(tmp_path: Path):
@@ -190,7 +191,7 @@ def test_eval_command_asks_before_spending(tmp_path: Path):
     result = CliRunner().invoke(main, ["--data-dir", str(tmp_path), "eval"], input="n\n")
     assert result.exit_code == 0
     # rich wraps the warning, so match a fragment that cannot break across lines
-    assert "10 real agent session(s)" in result.output
+    assert "real agent session(s)" in result.output
     assert "Aborted" in result.output
 
 
@@ -210,3 +211,98 @@ def test_eval_command_writes_a_report(tmp_path: Path):
     assert result.exit_code == 0, result.output
     report = json.loads(out.read_text())
     assert report["summary"]["solo"]["passed"] == 1
+
+
+# --- delegation tracking ---
+
+
+def test_the_solo_arm_never_reports_delegation(manager: AgentManager):
+    with patch("meta_agent.agent_runner.query", side_effect=_answering("banana")):
+        report = run_suite(manager, [TASKS[0]], arms=("solo",))
+    assert report["runs"][0]["subtasks"] == 0
+    assert report["runs"][0]["agents_used"] == 1
+
+
+def test_the_brain_arm_counts_the_subtasks_it_created(manager: AgentManager):
+    """Without this the brain arm can answer everything itself — it holds
+    Read/Glob/Grep — and the comparison silently measures one agent against
+    one agent."""
+    from meta_agent.brain import BRAIN_AGENT_ID
+    from meta_agent.models import AgentConfig
+
+    manager.register_agent(
+        AgentConfig(id="worker", name="W", system_prompt="x", allowed_tools=[])
+    )
+    real_submit = manager.submit_task
+    spawned: list[str] = []
+
+    def submit_and_delegate(agent_id, prompt, **kwargs):
+        task = real_submit(agent_id, prompt, **kwargs)
+        # emulate the Brain delegating once, into the same workflow
+        if agent_id == BRAIN_AGENT_ID and not spawned:
+            spawned.append("x")
+            real_submit("worker", "a subtask", workflow_id=kwargs.get("workflow_id"))
+        return task
+
+    with patch("meta_agent.agent_runner.query", side_effect=_answering("banana")):
+        with patch.object(manager, "submit_task", side_effect=submit_and_delegate):
+            report = run_suite(manager, [TASKS[0]], arms=("brain",))
+
+    run = report["runs"][0]
+    assert run["subtasks"] == 1
+    assert run["agents_used"] == 2
+    assert report["summary"]["brain"]["runs_that_delegated"] == 1
+
+
+def test_the_report_warns_when_the_brain_never_delegated(manager: AgentManager):
+    with patch("meta_agent.agent_runner.query", side_effect=_answering("banana")):
+        report = run_suite(manager, [TASKS[0]], arms=("brain",))
+
+    assert report["summary"]["brain"]["runs_that_delegated"] == 0
+    text = format_report(report)
+    assert "delegated on zero tasks" in text
+    assert "not" in text and "orchestration" in text
+
+
+def test_the_report_has_no_warning_when_only_solo_ran(manager: AgentManager):
+    with patch("meta_agent.agent_runner.query", side_effect=_answering("banana")):
+        report = run_suite(manager, [TASKS[0]], arms=("solo",))
+    assert "delegated on zero tasks" not in format_report(report)
+
+
+def test_the_shipped_default_task_set_requires_writing_files():
+    """A read-only task set cannot test the premise: the Brain answers it alone."""
+    tasks = load_tasks(Path("evals/tasks.json"))
+    assert len(tasks) >= 4
+    for task in tasks:
+        assert "creat" in task.prompt.lower(), f"{task.id} does not require producing files"
+
+
+def test_the_brain_arm_counts_work_filed_under_a_workflow_it_invented(manager: AgentManager):
+    """Observed live: given a workflow ID in its prompt, the Brain called
+    create_workflow anyway and filed all four sub-agents under its own record.
+    Reading workflow_usage(our id) then reported the Brain's turn alone and
+    missed every sub-agent's spend."""
+    from meta_agent.brain import BRAIN_AGENT_ID
+    from meta_agent.models import AgentConfig, Workflow
+
+    manager.register_agent(AgentConfig(id="worker", name="W", system_prompt="x", allowed_tools=[]))
+    real_submit = manager.submit_task
+    spawned: list[str] = []
+
+    def submit_and_delegate(agent_id, prompt, **kwargs):
+        task = real_submit(agent_id, prompt, **kwargs)
+        if agent_id == BRAIN_AGENT_ID and not spawned:
+            spawned.append("x")
+            rogue = Workflow(prompt="the Brain's own", brain_agent_id=BRAIN_AGENT_ID)
+            manager.db.save_workflow(rogue)
+            real_submit("worker", "a subtask", workflow_id=rogue.id)
+        return task
+
+    with patch("meta_agent.agent_runner.query", side_effect=_answering("banana", cost=0.03)):
+        with patch.object(manager, "submit_task", side_effect=submit_and_delegate):
+            report = run_suite(manager, [TASKS[0]], arms=("brain",))
+
+    run = report["runs"][0]
+    assert run["subtasks"] == 1, "the sub-agent's task was not counted"
+    assert run["cost_usd"] == pytest.approx(0.06), "sub-agent spend was dropped"

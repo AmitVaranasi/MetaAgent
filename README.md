@@ -256,15 +256,22 @@ about to start and asks first (`--yes` to skip). Tasks are JSON: an `id`, a
 `prompt`, and an optional `expect` list of substrings that must all appear in
 the final answer for the run to count as passed.
 
-A single-task smoke run (not a result — one task proves nothing about the
-premise, it just shows the shape of the output):
+The report includes a `delegated` column, because the Brain holds
+`Read`/`Glob`/`Grep` and will happily answer a read-only question itself. If it
+never delegates, the run is comparing one agent against one agent and the
+report says so. `evals/tasks.json` therefore requires producing files;
+`evals/tasks-readonly.json` is a cheaper analysis-only smoke set.
 
 ```
-arm         pass    rate      cost $    mean $     secs   mean s
-----------------------------------------------------------------
-brain   1/1         100%      0.0403    0.0403      9.6      9.6
-solo    1/1         100%      0.0906    0.0906     10.6     10.6
+arm         pass   rate     cost $    mean $    secs  mean s  delegated
+-----------------------------------------------------------------------
+brain    1/1      100%     0.0403    0.0403     9.6     9.6        0/1
+solo     1/1      100%     0.0906    0.0906    10.6    10.6        0/1
 ```
+
+That single-task smoke shows the shape of the output, not a finding — and the
+`0/1` is the point: on a read-only question the Brain answered alone, which is
+why it was cheaper.
 
 Cost comes from the SDK's own accounting, per task and summed per workflow, so
 the comparison is measured rather than estimated.

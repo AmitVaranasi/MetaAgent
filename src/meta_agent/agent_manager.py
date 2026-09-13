@@ -68,9 +68,14 @@ class _Run:
 
 
 class AgentManager:
-    def __init__(self, db: Database, log_dir: Path):
+    def __init__(self, db: Database, log_dir: Path, default_cwd: str | None = None):
         self.db = db
         self.log_dir = log_dir
+        # Where an agent runs when its config does not say. Without this, an
+        # agent created with cwd=None inherits the *launching process's*
+        # directory — a sub-agent asked to write README.md then overwrites the
+        # README of whatever repo you happened to start the CLI from.
+        self.default_cwd = default_cwd
         self._lock = threading.Lock()
         self._agents: dict[str, AgentState] = {}
         # Keyed by TASK id, not agent id: an agent can legitimately have several
@@ -194,6 +199,8 @@ class AgentManager:
     # --- Agent CRUD ---
 
     def register_agent(self, config: AgentConfig) -> AgentState:
+        if config.cwd is None and self.default_cwd is not None:
+            config = config.model_copy(update={"cwd": self.default_cwd})
         self.db.save_agent(config)
         state = AgentState(config=config)
         with self._lock:

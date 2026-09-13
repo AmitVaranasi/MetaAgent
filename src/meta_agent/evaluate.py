@@ -59,6 +59,11 @@ class RunResult:
     cost_usd: float
     input_tokens: int
     output_tokens: int
+    # How much orchestration actually happened. Without this the brain arm can
+    # quietly answer everything itself — it holds Read/Glob/Grep — and the
+    # comparison silently measures one agent against one agent.
+    subtasks: int = 0
+    agents_used: int = 0
     result: str | None = None
     error: str | None = None
 
@@ -123,15 +128,52 @@ def _run_solo(manager: AgentManager, task: EvalTask, cwd: str | None, timeout: f
         cost_usd=round(stored.cost_usd or 0.0, 6) if stored else 0.0,
         input_tokens=(stored.usage.get("input_tokens", 0) if stored else 0) or 0,
         output_tokens=(stored.usage.get("output_tokens", 0) if stored else 0) or 0,
+        subtasks=0,
+        agents_used=1,
         result=(stored.result or "")[:2000] if stored else None,
         error=stored.error if stored else None,
     )
+
+
+TERMINAL_STATUSES = ("completed", "failed", "cancelled", "waiting_for_input")
+
+
+def _settle(manager: AgentManager, task_ids: set[str], timeout: float = 60.0) -> None:
+    """Wait for tasks spawned during a run to finish, so their cost is recorded.
+
+    The Brain can return before a sub-agent it launched has finished; tallying
+    at that moment silently drops that sub-agent's spend.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pending = [
+            t for t in manager.list_tasks()
+            if t.id in task_ids and t.status not in TERMINAL_STATUSES
+        ]
+        if not pending:
+            return
+        time.sleep(0.05)
+
+
+def _tally(tasks: list[Any]) -> dict[str, Any]:
+    """Total cost and tokens over a set of tasks."""
+    return {
+        "cost_usd": sum(t.cost_usd or 0.0 for t in tasks),
+        "input_tokens": sum((t.usage.get("input_tokens") or 0) for t in tasks),
+        "output_tokens": sum((t.usage.get("output_tokens") or 0) for t in tasks),
+    }
 
 
 def _run_brain(manager: AgentManager, task: EvalTask, cwd: str | None, timeout: float) -> RunResult:
     config = get_brain_config()
     config.cwd = cwd
     manager.register_agent(config)
+
+    # Everything that already existed, so afterwards we can identify precisely
+    # what this run produced. Reading workflow_usage(our workflow) instead would
+    # miss every task the Brain filed under a workflow of its own — which it
+    # does whenever it ignores the ID it was given.
+    before = {t.id for t in manager.list_tasks()}
 
     workflow = Workflow(prompt=task.prompt, brain_agent_id=BRAIN_AGENT_ID)
     manager.db.save_workflow(workflow)
@@ -147,20 +189,27 @@ def _run_brain(manager: AgentManager, task: EvalTask, cwd: str | None, timeout: 
 
     status = _await_task(manager, submitted.id, timeout)
     stored = manager.get_task(submitted.id)
-    # The Brain's own answer, or the workflow result it assembled.
+    # The Brain's own answer, or the workflow result it assembled — which may
+    # be on a workflow it created for itself rather than the one we handed it.
     final = manager.db.get_workflow(workflow.id)
     answer = (final.result if final and final.result else None) or (stored.result if stored else None)
 
-    usage = manager.workflow_usage(workflow.id)
+    spawned = {t.id for t in manager.list_tasks()} - before
+    _settle(manager, spawned)
+    run_tasks = [t for t in manager.list_tasks() if t.id in spawned]
+    subtasks = [t for t in run_tasks if t.id != submitted.id]
+    totals = _tally(run_tasks)
     return RunResult(
         task_id=task.id,
         arm="brain",
         status=status,
         passed=status == "completed" and _scores(answer, task),
         seconds=round(time.monotonic() - started, 2),
-        cost_usd=round(usage["totals"]["cost_usd"], 6),
-        input_tokens=usage["totals"]["input_tokens"],
-        output_tokens=usage["totals"]["output_tokens"],
+        cost_usd=round(totals["cost_usd"], 6),
+        input_tokens=totals["input_tokens"],
+        output_tokens=totals["output_tokens"],
+        subtasks=len(subtasks),
+        agents_used=len({t.agent_id for t in run_tasks}),
         result=(answer or "")[:2000],
         error=stored.error if stored else None,
     )
@@ -202,6 +251,8 @@ def summarise(runs: list[RunResult], arms: tuple[str, ...] = ARMS) -> dict[str, 
             "mean_seconds": round(sum(r.seconds for r in arm_runs) / len(arm_runs), 2),
             "input_tokens": sum(r.input_tokens for r in arm_runs),
             "output_tokens": sum(r.output_tokens for r in arm_runs),
+            "total_subtasks": sum(r.subtasks for r in arm_runs),
+            "runs_that_delegated": sum(1 for r in arm_runs if r.subtasks > 0),
         }
     return summary
 
@@ -209,22 +260,34 @@ def summarise(runs: list[RunResult], arms: tuple[str, ...] = ARMS) -> dict[str, 
 def format_report(report: dict[str, Any]) -> str:
     """A plain-text comparison table."""
     lines = [
-        f"{'arm':<8}{'pass':>8}{'rate':>8}{'cost $':>12}{'mean $':>10}{'secs':>9}{'mean s':>9}",
-        "-" * 64,
+        f"{'arm':<8}{'pass':>8}{'rate':>7}{'cost $':>11}{'mean $':>10}"
+        f"{'secs':>8}{'mean s':>8}{'delegated':>11}",
+        "-" * 71,
     ]
     for arm, row in report["summary"].items():
         lines.append(
-            f"{arm:<8}{row['passed']}/{row['tasks']:<6}{row['pass_rate']:>8.0%}"
-            f"{row['total_cost_usd']:>12.4f}{row['mean_cost_usd']:>10.4f}"
-            f"{row['total_seconds']:>9.1f}{row['mean_seconds']:>9.1f}"
+            f"{arm:<8}{row['passed']}/{row['tasks']:<6}{row['pass_rate']:>7.0%}"
+            f"{row['total_cost_usd']:>11.4f}{row['mean_cost_usd']:>10.4f}"
+            f"{row['total_seconds']:>8.1f}{row['mean_seconds']:>8.1f}"
+            f"{row['runs_that_delegated']}/{row['tasks']:>9}"
         )
     lines.append("")
-    lines.append(f"{'task':<24}{'arm':<8}{'pass':<6}{'cost $':>10}{'secs':>8}")
-    lines.append("-" * 64)
+    lines.append(
+        f"{'task':<24}{'arm':<8}{'pass':<6}{'cost $':>10}{'secs':>8}{'subs':>6}{'agents':>8}"
+    )
+    lines.append("-" * 71)
     for run in report["runs"]:
         mark = "yes" if run["passed"] else "no"
         lines.append(
             f"{run['task_id'][:23]:<24}{run['arm']:<8}{mark:<6}"
             f"{run['cost_usd']:>10.4f}{run['seconds']:>8.1f}"
+            f"{run['subtasks']:>6}{run['agents_used']:>8}"
+        )
+    if report["summary"].get("brain", {}).get("runs_that_delegated") == 0:
+        lines.append("")
+        lines.append(
+            "NOTE: the brain arm delegated on zero tasks — it answered them itself with "
+            "Read/Glob/Grep. This run compares one agent against one agent, not "
+            "orchestration against one agent. Use tasks that require writing files."
         )
     return "\n".join(lines)

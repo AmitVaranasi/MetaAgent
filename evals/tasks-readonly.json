@@ -1,0 +1,27 @@
+[
+  {
+    "id": "explain-repo-layout",
+    "prompt": "Read the meta_agent package and describe, in under 120 words, what each of these does and how they connect: agent_manager.py, agent_runner.py, mcp_server.py. End your reply with the word DONE.",
+    "expect": ["agent_manager", "agent_runner", "mcp_server", "DONE"]
+  },
+  {
+    "id": "count-mcp-tools",
+    "prompt": "Count the tool functions returned by _tool_functions in src/meta_agent/mcp_server.py. Reply with the exact sentence 'There are N tools.' substituting the number, then the word DONE.",
+    "expect": ["there are 16 tools", "DONE"]
+  },
+  {
+    "id": "find-the-retry-policy",
+    "prompt": "In src/meta_agent/agent_manager.py, find _should_retry and state which exception type is deliberately never retried and why, in one sentence. End with the word DONE.",
+    "expect": ["AgentRunError", "DONE"]
+  },
+  {
+    "id": "summarise-db-threading",
+    "prompt": "Read src/meta_agent/db.py and explain in two sentences how connections are shared across threads. End with the word DONE.",
+    "expect": ["thread", "DONE"]
+  },
+  {
+    "id": "write-a-helper",
+    "prompt": "Create a file eval_out/slugify.py containing a function slugify(text: str) -> str that lowercases, replaces runs of non-alphanumerics with a single hyphen, and strips leading/trailing hyphens. Then run it on 'Hello,  World!' and confirm it prints hello-world. End with the word DONE.",
+    "expect": ["hello-world", "DONE"]
+  }
+]

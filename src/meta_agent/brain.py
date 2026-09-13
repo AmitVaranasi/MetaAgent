@@ -56,8 +56,12 @@ Context: {project_root}
 This summary is reused across all sub-agent prompts — you never re-read these files.
 
 ### Phase 2: PLAN
+A workflow has ALREADY been created for you and its ID is in your prompt. Use \
+that ID. Do NOT call create_workflow — a second workflow strands the first and \
+splits the run's cost across two records.
 Create numbered subtasks with dependencies and model assignments. \
-Write via `update_workflow(status="planning", plan="...")`.
+Write via `update_workflow(workflow_id=<the ID from your prompt>, \
+status="planning", plan="...")`.
 ```
 1. [Sonnet] Refactor auth module — depends: none
 2. [Sonnet] Update API routes — depends: 1
@@ -98,7 +102,8 @@ Opus is NOT available as sub-agent. You ARE Opus.
   output format, constraints. Tell agent to call `report_progress` with updates.
 - **Tools**: Coders: [Read,Glob,Grep,Bash,Edit,Write] | Reviewers: [Read,Glob,Grep] | \
   Runners: [Read,Bash,Glob,Grep] | Gemini: none
-- **cwd**: Set to project root
+- **cwd**: Set to the SAME directory you are running in. Omitting it lets the \
+  sub-agent write into whatever directory the CLI was launched from.
 
 ## Progress Reporting
 1. After analysis: `update_workflow(status="planning", plan="...")`
@@ -115,7 +120,7 @@ You will be resumed with the user's answer.
 
 ## Rules
 - NEVER write/edit/execute code yourself
-- Create workflow FIRST with create_workflow
+- Use the workflow ID from your prompt; NEVER call create_workflow
 - Submit ALL independent tasks before polling ANY
 - Delete every agent you created when done
 - NEVER call: AskUserQuestion, EnterPlanMode, ExitPlanMode
