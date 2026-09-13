@@ -1,0 +1,22 @@
+[
+  {
+    "id": "three-modules",
+    "prompt": "Create three independent files in the current working directory: mathops.py with add(a,b) and mul(a,b); strops.py with shout(s) returning uppercase plus '!' and slug(s) lowercasing and replacing spaces with hyphens; and README.md with a table of all four functions. Verify with python that add(2,3)==5 and shout('hi')=='HI!'. Reply with the word DONE when all three files exist and both checks pass.",
+    "expect": ["DONE"]
+  },
+  {
+    "id": "cli-plus-tests",
+    "prompt": "Create wordcount.py exposing count_words(text) -> dict mapping each lowercased word to its count, plus a __main__ block that counts a string given on argv. Then create test_wordcount.py with at least three pytest tests covering the empty string, repeated words, and mixed case. Run pytest and report the result. Reply with the word DONE when the tests pass.",
+    "expect": ["DONE"]
+  },
+  {
+    "id": "refactor-and-document",
+    "prompt": "Create legacy.py containing a single 40-line function that validates an email, normalizes a phone number, and formats a name. Then split it into three separate functions in a new file cleaned.py, write a docstring for each, and create MIGRATION.md explaining the split. Reply with the word DONE when all three files exist.",
+    "expect": ["DONE"]
+  },
+  {
+    "id": "data-pipeline",
+    "prompt": "Create sample.csv with 10 rows of id,name,score. Then create load.py that reads it into a list of dicts, stats.py that computes mean/median/max score, and report.py that prints a formatted summary. Run report.py and show its output. Reply with the word DONE when it runs cleanly.",
+    "expect": ["DONE"]
+  }
+]

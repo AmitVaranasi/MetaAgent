@@ -1,9 +1,10 @@
-"""SQLite database with WAL mode for agents and tasks."""
+"""SQLite storage for agents, tasks and workflows. One connection per thread."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,7 +21,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     agent_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     prompt TEXT NOT NULL,
-    messages_json TEXT NOT NULL DEFAULT '[]',
+    messages_json TEXT NOT NULL DEFAULT '[]',  -- legacy, unused; kept so old databases still open
     result TEXT,
     error TEXT,
     session_id TEXT,
@@ -47,19 +48,56 @@ CREATE TABLE IF NOT EXISTS workflows (
 _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN workflow_id TEXT",
     "ALTER TABLE tasks ADD COLUMN parent_task_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN owner_pid INTEGER",
+    "ALTER TABLE tasks ADD COLUMN model TEXT",
+    "ALTER TABLE tasks ADD COLUMN cost_usd REAL",
+    "ALTER TABLE tasks ADD COLUMN num_turns INTEGER",
+    "ALTER TABLE tasks ADD COLUMN stop_reason TEXT",
+    "ALTER TABLE tasks ADD COLUMN usage_json TEXT",
 ]
 
 
 class Database:
+    """SQLite storage with one connection PER THREAD.
+
+    A single connection opened with ``check_same_thread=False`` and no lock is
+    not safe here: AgentManager runs agents on a background event-loop thread
+    while the CLI, the MCP tools and the dashboard read from others. Sharing one
+    connection means sharing one transaction — a ``commit()`` on one thread can
+    commit another thread's half-written statement, and cursor state interleaves.
+
+    WAL is what makes a connection per thread cheap: one writer and any number
+    of concurrent readers, which is the concurrency WAL was turned on for in the
+    first place. ``busy_timeout`` covers the writer-vs-writer case.
+    """
+
     def __init__(self, db_path: Path):
         self.db_path = db_path
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.row_factory = sqlite3.Row
+        self._local = threading.local()
+        self._open_lock = threading.Lock()
+        self._open: list[sqlite3.Connection] = []
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._run_migrations()
+
+    def _new_connection(self) -> sqlite3.Connection:
+        # check_same_thread=False so close() can reach connections it did not open.
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        with self._open_lock:
+            self._open.append(conn)
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._new_connection()
+            self._local.conn = conn
+        return conn
 
     def _run_migrations(self) -> None:
         for sql in _MIGRATIONS:
@@ -70,7 +108,13 @@ class Database:
                 pass  # Column already exists
 
     def close(self) -> None:
-        self._conn.close()
+        """Close every thread's connection."""
+        with self._open_lock:
+            connections, self._open = self._open, []
+        for conn in connections:
+            conn.close()
+        # Drop the per-thread handles too, so a later call reopens cleanly.
+        self._local = threading.local()
 
     # --- Agent CRUD ---
 
@@ -103,15 +147,15 @@ class Database:
     def save_task(self, task: Task) -> None:
         self._conn.execute(
             """INSERT OR REPLACE INTO tasks
-               (id, agent_id, status, prompt, messages_json, result, error,
-                session_id, created_at, completed_at, workflow_id, parent_task_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, agent_id, status, prompt, result, error,
+                session_id, created_at, completed_at, workflow_id, parent_task_id,
+                owner_pid, model, cost_usd, num_turns, stop_reason, usage_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.agent_id,
                 task.status,
                 task.prompt,
-                json.dumps(task.messages),
                 task.result,
                 task.error,
                 task.session_id,
@@ -119,6 +163,12 @@ class Database:
                 task.completed_at.isoformat() if task.completed_at else None,
                 task.workflow_id,
                 task.parent_task_id,
+                task.owner_pid,
+                task.model,
+                task.cost_usd,
+                task.num_turns,
+                task.stop_reason,
+                json.dumps(task.usage),
             ),
         )
         self._conn.commit()
@@ -143,13 +193,24 @@ class Database:
             ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
+    def list_workflow_tasks(self, workflow_id: str) -> list[Task]:
+        """Every task belonging to a workflow.
+
+        Authoritative, unlike Workflow.subtask_ids, which only holds what the
+        Brain remembered to register via update_workflow(add_subtask_id=...).
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at",
+            (workflow_id,),
+        ).fetchall()
+        return [self._row_to_task(r) for r in rows]
+
     def _row_to_task(self, row: sqlite3.Row) -> Task:
         return Task(
             id=row["id"],
             agent_id=row["agent_id"],
             status=row["status"],
             prompt=row["prompt"],
-            messages=json.loads(row["messages_json"]),
             result=row["result"],
             error=row["error"],
             session_id=row["session_id"],
@@ -161,6 +222,12 @@ class Database:
             ),
             workflow_id=row["workflow_id"],
             parent_task_id=row["parent_task_id"],
+            owner_pid=row["owner_pid"],
+            model=row["model"],
+            cost_usd=row["cost_usd"],
+            num_turns=row["num_turns"],
+            stop_reason=row["stop_reason"],
+            usage=json.loads(row["usage_json"]) if row["usage_json"] else {},
         )
 
     # --- Workflow CRUD ---

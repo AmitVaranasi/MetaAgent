@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import atexit
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +24,9 @@ def _make_manager(base_dir: str | None = None) -> AgentManager:
     db = Database(cfg.db_path)
     mgr = AgentManager(db, cfg.log_dir)
     mgr.start()
+    # Nothing used to call shutdown(), so every command left its loop thread
+    # running and any in-flight task died mid-write on interpreter exit.
+    atexit.register(mgr.shutdown)
     return mgr
 
 
@@ -67,7 +72,7 @@ def list_agents(ctx: click.Context) -> None:
 @click.option("--name", required=True, help="Agent name")
 @click.option("--system-prompt", required=True, help="System prompt")
 @click.option("--tools", default="Read,Write,Edit,Bash,Glob,Grep", help="Comma-separated tool list (empty for none)")
-@click.option("--model", default="claude-sonnet-4-5-20250929", help="Model ID")
+@click.option("--model", default="claude-sonnet-5", help="Model ID")
 @click.option("--description", default="", help="Agent description")
 @click.option("--id", "agent_id", default=None, help="Custom agent ID")
 @click.option("--cwd", default=None, help="Working directory")
@@ -190,6 +195,74 @@ def mcp_server(ctx: click.Context) -> None:
     server.run(transport="stdio")
 
 
+@main.command("eval")
+@click.option("--tasks", "tasks_path", default="evals/tasks.json",
+              type=click.Path(exists=True, dir_okay=False), help="Task set JSON")
+@click.option("--arms", default="brain,solo", help="Comma-separated arms to run")
+@click.option("--cwd", "workdir", default=None, help="Working directory for the agents")
+@click.option("--timeout", default=900.0, help="Per-run timeout in seconds")
+@click.option("--out", "out_path", default=None, type=click.Path(dir_okay=False),
+              help="Write the full JSON report here")
+@click.option("--yes", is_flag=True, help="Skip the cost confirmation")
+@click.pass_context
+def evaluate_cmd(
+    ctx: click.Context,
+    tasks_path: str,
+    arms: str,
+    workdir: str | None,
+    timeout: float,
+    out_path: str | None,
+    yes: bool,
+) -> None:
+    """Compare orchestration against a single agent on the same tasks.
+
+    Answers the question the design rests on: does an Opus Brain delegating to
+    cheaper sub-agents actually beat one agent doing the work?
+    """
+    from .evaluate import ARMS, format_report, load_tasks, run_suite
+
+    selected = tuple(a.strip() for a in arms.split(",") if a.strip())
+    unknown = [a for a in selected if a not in ARMS]
+    if unknown:
+        console.print(f"[red]Unknown arm(s): {', '.join(unknown)}. Choose from {', '.join(ARMS)}.[/red]")
+        sys.exit(1)
+
+    tasks = load_tasks(Path(tasks_path))
+    runs = len(tasks) * len(selected)
+    console.print(
+        f"[yellow]This runs {runs} real agent session(s) "
+        f"({len(tasks)} task(s) x {len(selected)} arm(s)) and bills your account.[/yellow]"
+    )
+    if not yes and not click.confirm("Continue?", default=False):
+        console.print("[dim]Aborted.[/dim]")
+        return
+
+    mgr = _make_manager(ctx.obj["data_dir"])
+    report = run_suite(mgr, tasks, arms=selected, cwd=workdir, timeout=timeout)
+
+    console.print()
+    console.print(format_report(report))
+    if out_path:
+        Path(out_path).write_text(json.dumps(report, indent=2))
+        console.print(f"\n[green]Report written to {out_path}[/green]")
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Bind address")
+@click.option("--port", default=5000, help="Port to serve on")
+@click.option("--debug", is_flag=True, help="Run Flask in debug mode")
+@click.pass_context
+def dashboard(ctx: click.Context, host: str, port: int, debug: bool) -> None:
+    """Serve the web dashboard (agents, tasks, Kanban board)."""
+    from .dashboard.app import create_app
+
+    mgr = _make_manager(ctx.obj["data_dir"])
+    app = create_app(mgr)
+    console.print(f"[green]Dashboard on http://{host}:{port}[/green]")
+    console.print(f"[dim]  Kanban: http://{host}:{port}/kanban/enhanced[/dim]")
+    app.run(host=host, port=port, debug=debug)
+
+
 @main.command()
 @click.argument("prompt")
 @click.option("--wait", is_flag=True, help="Wait for workflow completion")
@@ -204,7 +277,7 @@ def brain(ctx: click.Context, prompt: str, wait: bool) -> None:
     mgr = _make_manager(ctx.obj["data_dir"])
 
     # Always re-register brain so config changes (e.g. permission_mode) take effect
-    brain_config = get_brain_config(["meta-agent", "mcp-server"])
+    brain_config = get_brain_config()
     mgr.register_agent(brain_config)
 
     # Create workflow
@@ -220,6 +293,8 @@ def brain(ctx: click.Context, prompt: str, wait: bool) -> None:
     )
     try:
         task = mgr.submit_task(BRAIN_AGENT_ID, brain_prompt, workflow_id=workflow.id)
+        workflow.brain_task_id = task.id
+        mgr.db.save_workflow(workflow)
         console.print(
             f"[green]Workflow {workflow.id} created, brain task {task.id} submitted[/green]"
         )
@@ -308,22 +383,30 @@ def workflow(ctx: click.Context, workflow_id: str | None) -> None:
 @click.pass_context
 def chat(ctx: click.Context) -> None:
     """Interactive chat with the Brain agent."""
-    import time
-
     from .brain import BRAIN_AGENT_ID, get_brain_config
-    from .chat_ui import get_user_input, print_progress, print_summary, print_welcome
+    from .chat_ui import (
+        ChatProgress,
+        get_user_input,
+        print_help,
+        print_plan_mode_toggle,
+        print_progress,
+        print_summary,
+        print_welcome,
+    )
     from .models import Workflow
 
     mgr = _make_manager(ctx.obj["data_dir"])
 
+    plan_mode = False
+
     # Always re-register brain so config changes (e.g. permission_mode) take effect
-    brain_config = get_brain_config(["meta-agent", "mcp-server"])
+    brain_config = get_brain_config(plan_mode=plan_mode)
     mgr.register_agent(brain_config)
 
-    print_welcome()
+    print_welcome(plan_mode=plan_mode)
 
     while True:
-        user_input = get_user_input()
+        user_input = get_user_input(plan_mode=plan_mode)
         if user_input is None:
             console.print("\nGoodbye!")
             break
@@ -334,21 +417,37 @@ def chat(ctx: click.Context) -> None:
             console.print("Goodbye!")
             break
 
+        # --- Slash command handling ---
+        if user_input.startswith("/"):
+            cmd = user_input.lower().split()[0]
+            if cmd == "/plan":
+                plan_mode = not plan_mode
+                brain_config = get_brain_config(plan_mode=plan_mode)
+                mgr.register_agent(brain_config)
+                print_plan_mode_toggle(plan_mode)
+            elif cmd == "/help":
+                print_help(plan_mode=plan_mode)
+            else:
+                console.print(f"  [red]Unknown command: {cmd}[/red]")
+                console.print("  Type '/help' for available commands.")
+            continue
+
+        # Re-register brain with current plan_mode before each task
+        brain_config = get_brain_config(plan_mode=plan_mode)
+        mgr.register_agent(brain_config)
+
         # Create workflow
         wf = Workflow(prompt=user_input, brain_agent_id=BRAIN_AGENT_ID)
         mgr.db.save_workflow(wf)
 
         console.print()
-        console.print("  [dim]Brain is thinking...[/dim]")
+        if plan_mode:
+            console.print("  [dim]Brain is planning (will pause for approval)...[/dim]")
+        else:
+            console.print("  [dim]Brain is thinking...[/dim]")
 
-        # Progress callback that fires events to the terminal.
-        # Registered as both the per-task callback and a global listener so
-        # sub-agent tool calls (tool_call, tool_result, agent_progress) are
-        # also displayed in real time.
-        def on_progress(event: dict) -> None:
-            print_progress(event)
-
-        mgr.add_progress_listener(on_progress)
+        progress = ChatProgress(brain_task_id="", workflow_id=wf.id)
+        mgr.add_progress_listener(progress)
 
         brain_prompt = (
             f"Workflow ID: {wf.id}\n\n"
@@ -360,140 +459,38 @@ def chat(ctx: click.Context) -> None:
         )
 
         try:
-            task = mgr.submit_task(
-                BRAIN_AGENT_ID,
-                brain_prompt,
-                workflow_id=wf.id,
-                on_progress=on_progress,
-            )
+            task = mgr.submit_task(BRAIN_AGENT_ID, brain_prompt, workflow_id=wf.id)
         except ValueError as e:
             console.print(f"  [red]{e}[/red]")
+            mgr.remove_progress_listener(progress)
             continue
 
+        progress.brain_task_id = task.id
+        wf.brain_task_id = task.id
+        mgr.db.save_workflow(wf)
         print_progress({"kind": "workflow_created", "workflow_id": wf.id})
 
-        # Poll for progress, with resume loop for clarifying questions
+        # Wait on events, not on a poll. Loops back around whenever the Brain
+        # pauses to ask the user something.
         brain_task_id = task.id
-        last_wf_status = wf.status.value
-        last_subtask_count = 0
-        reported_subtasks: set[str] = set()
-        reported_done: set[str] = set()
-
-        # Outer loop: handles resume cycles when Brain asks questions
-        workflow_done = False
-        while not workflow_done:
-            # Inner loop: polls task status every 2s
+        try:
             while True:
-                time.sleep(2)
+                progress.finished.wait()
+
+                if progress.outcome != "waiting_for_input":
+                    break
 
                 t = mgr.get_task(brain_task_id)
-                if t is None:
-                    workflow_done = True
-                    break
-
-                # Poll workflow for progress updates
-                current_wf = mgr.db.get_workflow(wf.id)
-                if current_wf:
-                    if current_wf.status.value != last_wf_status:
-                        last_wf_status = current_wf.status.value
-                        if last_wf_status == "executing":
-                            if current_wf.plan:
-                                total = len(current_wf.subtask_ids) if current_wf.subtask_ids else 0
-                                print_progress({
-                                    "kind": "plan_ready",
-                                    "plan": current_wf.plan,
-                                    "total": total,
-                                })
-                            else:
-                                print_progress({"kind": "planning"})
-                        elif last_wf_status == "assembling":
-                            print_progress({"kind": "assembling"})
-
-                    if current_wf.subtask_ids:
-                        total = len(current_wf.subtask_ids)
-                        if total > last_subtask_count:
-                            if last_subtask_count == 0 and current_wf.plan and last_wf_status != "executing":
-                                print_progress({
-                                    "kind": "plan_ready",
-                                    "plan": current_wf.plan,
-                                    "total": total,
-                                })
-                            last_subtask_count = total
-
-                        for idx, tid in enumerate(current_wf.subtask_ids, 1):
-                            st = mgr.get_task(tid)
-                            if st is None:
-                                continue
-                            if tid not in reported_subtasks and st.status == "running":
-                                reported_subtasks.add(tid)
-                                print_progress({
-                                    "kind": "subtask_running",
-                                    "index": idx,
-                                    "total": total,
-                                    "description": st.prompt[:120],
-                                    "agent_id": st.agent_id,
-                                })
-                            if tid not in reported_done and st.status == "completed":
-                                reported_done.add(tid)
-                                if tid not in reported_subtasks:
-                                    reported_subtasks.add(tid)
-                                print_progress({
-                                    "kind": "subtask_done",
-                                    "index": idx,
-                                    "total": total,
-                                })
-                            if tid not in reported_done and st.status == "failed":
-                                reported_done.add(tid)
-                                print_progress({
-                                    "kind": "subtask_failed",
-                                    "index": idx,
-                                    "total": total,
-                                    "error": st.error or "unknown",
-                                })
-
-                # Brain is waiting for user input — break to collect answer
-                if t.status == "waiting_for_input":
-                    break
-
-                # Check if brain task finished
-                if t.status in ("completed", "failed"):
-                    final_wf = mgr.db.get_workflow(wf.id)
-                    if final_wf:
-                        subtask_objs = []
-                        for tid in (final_wf.subtask_ids or []):
-                            st = mgr.get_task(tid)
-                            if st:
-                                subtask_objs.append(st)
-                        print_summary(final_wf, subtask_objs)
-                    elif t.status == "completed":
-                        console.print(f"\n  [green]Done.[/green]")
-                        if t.result:
-                            console.print(f"  {t.result[:500]}")
-                    else:
-                        console.print(f"\n  [red]Failed: {t.error}[/red]")
-                    workflow_done = True
-                    break
-
-            # After inner loop: handle waiting_for_input or done
-            if workflow_done:
-                mgr.remove_progress_listener(on_progress)
-                break
-
-            t = mgr.get_task(brain_task_id)
-            if t and t.status == "waiting_for_input":
-                # Show Brain's questions to the user
                 console.print()
                 console.print("  [bold cyan]Brain has questions:[/bold cyan]")
-                if t.result:
+                if t and t.result:
                     for line in t.result.strip().splitlines():
                         console.print(f"  {line}")
                 console.print()
 
-                # Collect user's answer
-                answer = get_user_input()
+                answer = get_user_input(plan_mode=plan_mode)
                 if answer is None:
                     console.print("\nGoodbye!")
-                    workflow_done = True
                     break
                 answer = answer.strip()
                 if not answer:
@@ -501,15 +498,26 @@ def chat(ctx: click.Context) -> None:
 
                 console.print()
                 console.print("  [dim]Brain is continuing...[/dim]")
-
+                progress.finished.clear()
+                progress.outcome = None
                 try:
-                    mgr.resume_task(
-                        brain_task_id,
-                        answer,
-                        on_progress=on_progress,
-                    )
+                    mgr.resume_task(brain_task_id, answer)
                 except ValueError as e:
                     console.print(f"  [red]{e}[/red]")
-                    workflow_done = True
                     break
-                # Loop back to inner polling
+            final_wf = mgr.db.get_workflow(wf.id)
+            if final_wf:
+                subtasks = [
+                    st for st in mgr.db.list_workflow_tasks(wf.id) if st.id != brain_task_id
+                ]
+                print_summary(final_wf, subtasks, mgr.workflow_usage(wf.id))
+            else:
+                t = mgr.get_task(brain_task_id)
+                if t and t.status == "completed":
+                    console.print("\n  [green]Done.[/green]")
+                    if t.result:
+                        console.print(f"  {t.result[:500]}")
+                elif t:
+                    console.print(f"\n  [red]Failed: {t.error}[/red]")
+        finally:
+            mgr.remove_progress_listener(progress)

@@ -38,5 +38,5 @@ def sample_config() -> AgentConfig:
         description="A test agent",
         system_prompt="You are a test agent.",
         allowed_tools=["Read", "Grep"],
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-5",
     )

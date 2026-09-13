@@ -67,7 +67,7 @@ def api_create_agent():
         name=data["name"],
         system_prompt=data.get("system_prompt", "You are a helpful assistant."),
         allowed_tools=tools,
-        model=data.get("model", "claude-sonnet-4-5-20250929"),
+        model=data.get("model", "claude-sonnet-5"),
         description=data.get("description", ""),
     )
     state = _mgr().register_agent(config)
@@ -83,20 +83,19 @@ def api_delete_agent(agent_id: str):
 
 @bp.route("/api/agents/<agent_id>/start", methods=["POST"])
 def api_start_agent(agent_id: str):
-    state = _mgr().get_agent(agent_id)
+    state = _mgr().start_agent(agent_id)
     if state is None:
-        return jsonify({"error": "not found"}), 404
-    state.status = AgentStatus.IDLE
+        return jsonify({"error": f"Agent {agent_id} not found"}), 404
     return jsonify({"id": agent_id, "status": state.status.value})
 
 
 @bp.route("/api/agents/<agent_id>/stop", methods=["POST"])
 def api_stop_agent(agent_id: str):
-    state = _mgr().get_agent(agent_id)
+    cancelled = _mgr().running_task_ids(agent_id)
+    state = _mgr().stop_agent(agent_id)
     if state is None:
-        return jsonify({"error": "not found"}), 404
-    state.status = AgentStatus.STOPPED
-    return jsonify({"id": agent_id, "status": state.status.value})
+        return jsonify({"error": f"Agent {agent_id} not found"}), 404
+    return jsonify({"id": agent_id, "status": state.status.value, "cancelled_task_ids": cancelled})
 
 
 @bp.route("/api/agents/<agent_id>/logs")
@@ -120,6 +119,9 @@ def api_list_tasks():
             "error": t.error,
             "created_at": str(t.created_at),
             "completed_at": str(t.completed_at) if t.completed_at else None,
+            "model": t.model,
+            "cost_usd": t.cost_usd,
+            "num_turns": t.num_turns,
         }
         for t in tasks
     ])
@@ -170,6 +172,14 @@ def api_list_workflows():
         }
         for w in workflows
     ])
+
+
+@bp.route("/api/workflows/<workflow_id>/usage")
+def api_workflow_usage(workflow_id: str):
+    """Cost totals and the per-model breakdown for one workflow."""
+    if _mgr().db.get_workflow(workflow_id) is None:
+        return jsonify({"error": f"Workflow {workflow_id} not found"}), 404
+    return jsonify(_mgr().workflow_usage(workflow_id))
 
 
 @bp.route("/api/workflows", methods=["POST"])

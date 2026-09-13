@@ -7,7 +7,7 @@ def test_agent_config_defaults():
     cfg = AgentConfig(name="Test", system_prompt="Hello")
     assert cfg.name == "Test"
     assert len(cfg.id) == 8
-    assert cfg.model == "claude-sonnet-4-5-20250929"
+    assert cfg.model == "claude-sonnet-5"
     assert "Read" in cfg.allowed_tools
     assert cfg.max_turns == 50
     assert cfg.auto_restart is False
@@ -21,7 +21,8 @@ def test_agent_config_custom_id():
 def test_agent_state_defaults():
     cfg = AgentConfig(name="Test", system_prompt="Hello")
     state = AgentState(config=cfg)
-    assert state.status == AgentStatus.STOPPED
+    # A registered agent is ready for work; STOPPED means deliberately stopped.
+    assert state.status == AgentStatus.IDLE
     assert state.session_id is None
     assert state.restart_count == 0
 
@@ -31,7 +32,6 @@ def test_task_defaults():
     assert t.status == "pending"
     assert len(t.id) == 12
     assert t.result is None
-    assert t.messages == []
 
 
 def test_agent_config_serialization():
