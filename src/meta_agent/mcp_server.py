@@ -114,25 +114,18 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
         return {"error": f"Agent {agent_id} not found"}
 
     def start_agent(agent_id: str) -> dict:
-        """Start an agent (set to idle, ready for tasks)."""
-        from .models import AgentStatus
-
-        state = manager.get_agent(agent_id)
+        """Bring a stopped agent back into service so it accepts tasks again."""
+        state = manager.start_agent(agent_id)
         if state is None:
             return {"error": f"Agent {agent_id} not found"}
-        state.status = AgentStatus.IDLE
         return {"id": agent_id, "status": state.status.value}
 
     def stop_agent(agent_id: str) -> dict:
-        """Stop an agent, cancelling every task it currently has in flight."""
-        from .models import AgentStatus
-
-        state = manager.get_agent(agent_id)
+        """Stop an agent: cancel its in-flight tasks and refuse new ones."""
+        cancelled = manager.running_task_ids(agent_id)
+        state = manager.stop_agent(agent_id)
         if state is None:
             return {"error": f"Agent {agent_id} not found"}
-        cancelled = manager.cancel_agent_tasks(agent_id)
-        state.status = AgentStatus.STOPPED
-        state.current_task_id = None
         return {"id": agent_id, "status": state.status.value, "cancelled_task_ids": cancelled}
 
     def agent_logs(agent_id: str, lines: int = 100) -> str:
@@ -152,6 +145,13 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
                 workflow_id=workflow_id,
                 parent_task_id=parent_task_id,
             )
+            manager.broadcast_progress({
+                "kind": "subtask_submitted",
+                "task_id": task.id,
+                "agent_id": agent_id,
+                "workflow_id": workflow_id,
+                "prompt": prompt,
+            })
             return {"task_id": task.id, "agent_id": agent_id, "status": task.status}
         except ValueError as e:
             return {"error": str(e)}
@@ -349,6 +349,14 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
             from datetime import datetime, timezone
             workflow.completed_at = datetime.now(timezone.utc)
         manager.db.save_workflow(workflow)
+        manager.broadcast_progress({
+            "kind": "workflow_update",
+            "workflow_id": workflow.id,
+            "status": workflow.status.value,
+            "plan": plan,
+            "result": result,
+            "error": error,
+        })
         return {"id": workflow.id, "status": workflow.status.value}
 
     def workflow_usage(workflow_id: str) -> dict:

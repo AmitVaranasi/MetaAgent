@@ -83,20 +83,19 @@ def api_delete_agent(agent_id: str):
 
 @bp.route("/api/agents/<agent_id>/start", methods=["POST"])
 def api_start_agent(agent_id: str):
-    state = _mgr().get_agent(agent_id)
+    state = _mgr().start_agent(agent_id)
     if state is None:
-        return jsonify({"error": "not found"}), 404
-    state.status = AgentStatus.IDLE
+        return jsonify({"error": f"Agent {agent_id} not found"}), 404
     return jsonify({"id": agent_id, "status": state.status.value})
 
 
 @bp.route("/api/agents/<agent_id>/stop", methods=["POST"])
 def api_stop_agent(agent_id: str):
-    state = _mgr().get_agent(agent_id)
+    cancelled = _mgr().running_task_ids(agent_id)
+    state = _mgr().stop_agent(agent_id)
     if state is None:
-        return jsonify({"error": "not found"}), 404
-    state.status = AgentStatus.STOPPED
-    return jsonify({"id": agent_id, "status": state.status.value})
+        return jsonify({"error": f"Agent {agent_id} not found"}), 404
+    return jsonify({"id": agent_id, "status": state.status.value, "cancelled_task_ids": cancelled})
 
 
 @bp.route("/api/agents/<agent_id>/logs")

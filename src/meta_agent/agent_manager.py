@@ -10,6 +10,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,12 @@ ProgressCallback = Callable[[dict[str, Any]], None] | None
 IN_FLIGHT_STATUSES = ("pending", "running")
 # waiting_for_input is deliberately excluded: it survives a restart on purpose,
 # because task.session_id lets a later process resume the conversation.
+
+# Backoff between automatic retries: 2s, 4s, 8s...
+RETRY_BASE_DELAY_S = 2.0
+# Bytes per agent log file before it rolls over, and how many rolls to keep.
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
 
 ORPHANED_ERROR = (
     "Orphaned: the process that owned this task exited before it finished "
@@ -75,6 +82,10 @@ class AgentManager:
         self._progress_listeners: list[Callable[[dict[str, Any]], None]] = []
         # Built on first use; holds a live server object, so it is never persisted.
         self._mcp_servers: dict[str, Any] | None = None
+        # One rotating logger per agent, opened once instead of per message.
+        self._agent_loggers: dict[str, logging.Logger] = {}
+        # Overridable so tests do not sit through real backoff.
+        self.retry_base_delay_s = RETRY_BASE_DELAY_S
 
     def mcp_servers_for(self, config: AgentConfig) -> dict[str, Any] | None:
         """Return the MCP servers an agent should run with.
@@ -103,6 +114,19 @@ class AgentManager:
             self._progress_listeners.remove(callback)
         except ValueError:
             pass
+
+    def broadcast_progress(self, event: dict[str, Any]) -> None:
+        """Send an event to every registered listener.
+
+        The in-process MCP tools use this so workflow-level milestones (a plan
+        landing, a subtask being submitted) reach the terminal as they happen,
+        instead of being reconstructed by polling the database.
+        """
+        for cb in list(self._progress_listeners):
+            try:
+                cb(event)
+            except Exception:
+                logger.debug("Progress listener error", exc_info=True)
 
     def start(self) -> None:
         """Load agents from DB, reap orphans, start the background event loop."""
@@ -198,6 +222,29 @@ class AgentManager:
                 asyncio.run_coroutine_threadsafe(runner.cancel(), self._loop)
         return [tid for tid, _ in runs]
 
+    def start_agent(self, agent_id: str) -> AgentState | None:
+        """Bring a stopped agent back into service. Returns the state, if any."""
+        with self._lock:
+            state = self._agents.get(agent_id)
+            if state is None:
+                return None
+            if state.status is AgentStatus.STOPPED:
+                state.status = AgentStatus.IDLE
+                state.error = None
+            return state
+
+    def stop_agent(self, agent_id: str) -> AgentState | None:
+        """Cancel an agent's work and refuse further submissions until started."""
+        with self._lock:
+            state = self._agents.get(agent_id)
+        if state is None:
+            return None
+        self.cancel_agent_tasks(agent_id)
+        with self._lock:
+            state.status = AgentStatus.STOPPED
+            state.current_task_id = None
+        return state
+
     def running_task_ids(self, agent_id: str) -> list[str]:
         """Task ids currently in flight for an agent."""
         with self._lock:
@@ -226,6 +273,10 @@ class AgentManager:
             state = self._agents.get(agent_id)
         if state is None:
             raise ValueError(f"Agent {agent_id} not registered")
+        if state.status is AgentStatus.STOPPED:
+            raise ValueError(
+                f"Agent {agent_id} is stopped; start it before submitting work"
+            )
 
         task = Task(
             agent_id=agent_id,
@@ -249,13 +300,20 @@ class AgentManager:
         return task
 
     def _fire_progress(self, callback: ProgressCallback, event: dict[str, Any]) -> None:
-        """Safely invoke the progress callback."""
-        if callback is None:
-            return
-        try:
-            callback(event)
-        except Exception:
-            logger.debug("Progress callback error", exc_info=True)
+        """Deliver an event to the per-task callback AND the global listeners.
+
+        Lifecycle events (status_change, task_completed, task_failed,
+        task_cancelled, waiting_for_input) used to reach only the per-task
+        callback, while tool events reached both. Anything watching purely
+        through add_progress_listener therefore never learned that a task had
+        finished — a listener-driven caller waits forever.
+        """
+        if callback is not None:
+            try:
+                callback(event)
+            except Exception:
+                logger.debug("Progress callback error", exc_info=True)
+        self.broadcast_progress(event)
 
     def resume_task(
         self,
@@ -447,26 +505,40 @@ class AgentManager:
         return state
 
     def _open_log(self, agent_id: str) -> Callable[[object], None]:
-        """Return an on_message sink that appends to the agent's log file."""
-        log_path = self.log_dir / f"{agent_id}.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        """Return an on_message sink for the agent's log.
+
+        Backed by a rotating handler opened once per agent. The previous version
+        reopened the file for every SDK message and never rotated, which is how
+        brain.log reached 13 MB.
+        """
+        agent_logger = self._agent_loggers.get(agent_id)
+        if agent_logger is None:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            agent_logger = logging.getLogger(f"meta_agent.agents.{agent_id}")
+            agent_logger.setLevel(logging.INFO)
+            agent_logger.propagate = False
+            for handler in list(agent_logger.handlers):
+                agent_logger.removeHandler(handler)
+                handler.close()
+            handler = RotatingFileHandler(
+                self.log_dir / f"{agent_id}.log",
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+            )
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            agent_logger.addHandler(handler)
+            self._agent_loggers[agent_id] = agent_logger
 
         def on_message(msg: object) -> None:
-            with open(log_path, "a") as f:
-                f.write(f"{msg}\n")
+            agent_logger.info("%s", msg)
 
         return on_message
 
     def _combined_progress(self, on_progress: ProgressCallback) -> Callable[[dict[str, Any]], None]:
-        """Merge the per-task callback with the global listeners."""
+        """The runner's progress sink. Fan-out lives in _fire_progress."""
 
         def fire(event: dict[str, Any]) -> None:
             self._fire_progress(on_progress, event)
-            for cb in list(self._progress_listeners):
-                try:
-                    cb(event)
-                except Exception:
-                    logger.debug("Progress listener error", exc_info=True)
 
         return fire
 
@@ -540,54 +612,90 @@ class AgentManager:
         task: Task,
         on_progress: ProgressCallback = None,
     ) -> None:
-        """Execute a task and update state on completion."""
-        self._mark_running(task, on_progress)
-        try:
-            state = self.get_agent(agent_id)
-            if state is None:
-                raise RuntimeError(f"Agent {agent_id} was deleted before its task could run")
+        """Execute a task, retrying it in place if the agent asks for that."""
+        attempt = 0
+        while True:
+            self._mark_running(task, on_progress)
+            try:
+                state = self.get_agent(agent_id)
+                if state is None:
+                    raise RuntimeError(f"Agent {agent_id} was deleted before its task could run")
 
-            if state.config.model.startswith("external:"):
-                ext_runner = ExternalModelRunner(state.config.model)
-                result = await ext_runner.run(task.prompt, state.config.system_prompt)
-            else:
-                result = await runner.run_task(
-                    task,
-                    on_message=self._open_log(agent_id),
-                    on_progress=self._combined_progress(on_progress),
-                )
+                if state.config.model.startswith("external:"):
+                    ext_runner = ExternalModelRunner(state.config.model)
+                    result = await ext_runner.run(task.prompt, state.config.system_prompt)
+                else:
+                    result = await runner.run_task(
+                        task,
+                        on_message=self._open_log(agent_id),
+                        on_progress=self._combined_progress(on_progress),
+                    )
 
-            # Persist session_id immediately so resume works even if we crash later
-            self.db.save_task(task)
-            self._finish_or_pause(agent_id, task, result, on_progress, runner)
-        except asyncio.CancelledError:
-            # stop_agent / unregister_agent reached this task. Record it as
-            # cancelled rather than leaving it mid-flight, then let the
-            # cancellation continue to propagate.
-            task.status = "cancelled"
-            task.completed_at = datetime.now(timezone.utc)
-            self.db.save_task(task)
-            self._fail_workflow_for(task, error="The orchestrating task was cancelled.")
-            self._end_run(agent_id, task.id, AgentStatus.STOPPED)
-            self._fire_progress(on_progress, {"kind": "task_cancelled", "task_id": task.id})
-            raise
-        except Exception as e:
-            logger.exception("Task %s failed for agent %s", task.id, agent_id)
-            state = self._record_failure(agent_id, runner, task, e, on_progress)
-            # state is None when the agent was deleted mid-run; there is then
-            # nothing to restart. Reading self._agents[agent_id] here used to
-            # raise a KeyError *inside* the handler and orphan the task.
-            if (
-                state is not None
-                and state.config.auto_restart
-                and state.restart_count < state.config.max_restarts
-            ):
+                # Persist session_id immediately so resume works even if we crash later
+                self.db.save_task(task)
+                self._finish_or_pause(agent_id, task, result, on_progress, runner)
+                return
+            except asyncio.CancelledError:
+                # stop_agent / unregister_agent / shutdown reached this task.
+                # Record it as cancelled rather than leaving it mid-flight, then
+                # let the cancellation continue to propagate.
+                task.status = "cancelled"
+                task.completed_at = datetime.now(timezone.utc)
+                self.db.save_task(task)
+                self._fail_workflow_for(task, error="The orchestrating task was cancelled.")
+                self._end_run(agent_id, task.id, AgentStatus.STOPPED)
+                self._fire_progress(on_progress, {"kind": "task_cancelled", "task_id": task.id})
+                raise
+            except Exception as e:
+                logger.exception("Task %s failed for agent %s", task.id, agent_id)
+                # state is None when the agent was deleted mid-run; reading
+                # self._agents[agent_id] here used to raise a KeyError *inside*
+                # the handler and orphan the task.
+                state = self.get_agent(agent_id)
+                if not self._should_retry(state, e, attempt):
+                    self._record_failure(agent_id, runner, task, e, on_progress)
+                    return
+
+                attempt += 1
+                delay = self.retry_base_delay_s * (2 ** (attempt - 1))
                 with self._lock:
                     state.restart_count += 1
-                    state.status = AgentStatus.IDLE
+                    state.status = AgentStatus.RUNNING
                     state.error = None
-        finally:
-            self.db.save_task(task)
+                self._fire_progress(on_progress, {
+                    "kind": "task_retrying",
+                    "task_id": task.id,
+                    "attempt": attempt,
+                    "max_attempts": state.config.max_restarts,
+                    "delay_s": delay,
+                    "error": str(e),
+                })
+                await asyncio.sleep(delay)
+                task.error = None
+                # A fresh runner: the old one carries the failed run's stderr and stats.
+                runner = AgentRunner(
+                    state.config, mcp_servers=self.mcp_servers_for(state.config)
+                )
+                self._start_run(agent_id, task.id, runner)
+            finally:
+                self.db.save_task(task)
+
+    @staticmethod
+    def _should_retry(state: AgentState | None, exc: Exception, attempt: int) -> bool:
+        """Whether to run this task again.
+
+        auto_restart used to only reset the agent's status flag — the task was
+        never resubmitted, so "auto restart" restarted nothing and retrying was
+        left to the Brain's prompt. Retries now re-run the SAME task id, because
+        the Brain polls the id it was given and would never see a new one.
+
+        AgentRunError is excluded: it means the SDK itself ended the run (most
+        often max_turns), and running the identical prompt again just burns the
+        same budget to reach the same place.
+        """
+        if state is None or isinstance(exc, AgentRunError):
+            return False
+        return state.config.auto_restart and attempt < state.config.max_restarts
 
     # --- Logs ---
 

@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     agent_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     prompt TEXT NOT NULL,
-    messages_json TEXT NOT NULL DEFAULT '[]',
+    messages_json TEXT NOT NULL DEFAULT '[]',  -- legacy, unused; kept so old databases still open
     result TEXT,
     error TEXT,
     session_id TEXT,
@@ -147,16 +147,15 @@ class Database:
     def save_task(self, task: Task) -> None:
         self._conn.execute(
             """INSERT OR REPLACE INTO tasks
-               (id, agent_id, status, prompt, messages_json, result, error,
+               (id, agent_id, status, prompt, result, error,
                 session_id, created_at, completed_at, workflow_id, parent_task_id,
                 owner_pid, model, cost_usd, num_turns, stop_reason, usage_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.agent_id,
                 task.status,
                 task.prompt,
-                json.dumps(task.messages),
                 task.result,
                 task.error,
                 task.session_id,
@@ -212,7 +211,6 @@ class Database:
             agent_id=row["agent_id"],
             status=row["status"],
             prompt=row["prompt"],
-            messages=json.loads(row["messages_json"]),
             result=row["result"],
             error=row["error"],
             session_id=row["session_id"],

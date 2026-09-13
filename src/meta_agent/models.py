@@ -11,6 +11,14 @@ from pydantic import BaseModel, Field
 
 
 class AgentStatus(str, Enum):
+    """An agent's lifecycle state.
+
+    STOPPED means *deliberately* stopped and refusing work — it is not the
+    state a freshly registered agent is in. It used to be the default, which
+    made the whole enum decorative: submit_task ran regardless of it, so
+    start_agent and stop_agent changed a label and nothing else.
+    """
+
     STOPPED = "stopped"
     RUNNING = "running"
     IDLE = "idle"
@@ -41,7 +49,7 @@ class AgentConfig(BaseModel):
 
 class AgentState(BaseModel):
     config: AgentConfig
-    status: AgentStatus = AgentStatus.STOPPED
+    status: AgentStatus = AgentStatus.IDLE
     session_id: str | None = None
     current_task_id: str | None = None
     # Every task currently in flight for this agent. current_task_id is the most
@@ -57,7 +65,6 @@ class Task(BaseModel):
     agent_id: str
     status: str = "pending"
     prompt: str
-    messages: list[dict[str, Any]] = Field(default_factory=list)
     result: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

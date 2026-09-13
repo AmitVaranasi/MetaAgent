@@ -330,10 +330,9 @@ def workflow(ctx: click.Context, workflow_id: str | None) -> None:
 @click.pass_context
 def chat(ctx: click.Context) -> None:
     """Interactive chat with the Brain agent."""
-    import time
-
     from .brain import BRAIN_AGENT_ID, get_brain_config
     from .chat_ui import (
+        ChatProgress,
         get_user_input,
         print_help,
         print_plan_mode_toggle,
@@ -394,14 +393,8 @@ def chat(ctx: click.Context) -> None:
         else:
             console.print("  [dim]Brain is thinking...[/dim]")
 
-        # Progress callback that fires events to the terminal.
-        # Registered as both the per-task callback and a global listener so
-        # sub-agent tool calls (tool_call, tool_result, agent_progress) are
-        # also displayed in real time.
-        def on_progress(event: dict) -> None:
-            print_progress(event)
-
-        mgr.add_progress_listener(on_progress)
+        progress = ChatProgress(brain_task_id="", workflow_id=wf.id)
+        mgr.add_progress_listener(progress)
 
         brain_prompt = (
             f"Workflow ID: {wf.id}\n\n"
@@ -413,144 +406,38 @@ def chat(ctx: click.Context) -> None:
         )
 
         try:
-            task = mgr.submit_task(
-                BRAIN_AGENT_ID,
-                brain_prompt,
-                workflow_id=wf.id,
-                on_progress=on_progress,
-            )
+            task = mgr.submit_task(BRAIN_AGENT_ID, brain_prompt, workflow_id=wf.id)
         except ValueError as e:
             console.print(f"  [red]{e}[/red]")
+            mgr.remove_progress_listener(progress)
             continue
 
+        progress.brain_task_id = task.id
         wf.brain_task_id = task.id
         mgr.db.save_workflow(wf)
         print_progress({"kind": "workflow_created", "workflow_id": wf.id})
 
-        # Poll for progress, with resume loop for clarifying questions
+        # Wait on events, not on a poll. Loops back around whenever the Brain
+        # pauses to ask the user something.
         brain_task_id = task.id
-        last_wf_status = wf.status.value
-        last_subtask_count = 0
-        reported_subtasks: set[str] = set()
-        reported_done: set[str] = set()
-
-        # Outer loop: handles resume cycles when Brain asks questions
-        workflow_done = False
-        while not workflow_done:
-            # Inner loop: polls task status every 2s
+        try:
             while True:
-                time.sleep(2)
+                progress.finished.wait()
+
+                if progress.outcome != "waiting_for_input":
+                    break
 
                 t = mgr.get_task(brain_task_id)
-                if t is None:
-                    workflow_done = True
-                    break
-
-                # Poll workflow for progress updates
-                current_wf = mgr.db.get_workflow(wf.id)
-                if current_wf:
-                    if current_wf.status.value != last_wf_status:
-                        last_wf_status = current_wf.status.value
-                        if last_wf_status == "executing":
-                            if current_wf.plan:
-                                total = len(current_wf.subtask_ids) if current_wf.subtask_ids else 0
-                                print_progress({
-                                    "kind": "plan_ready",
-                                    "plan": current_wf.plan,
-                                    "total": total,
-                                })
-                            else:
-                                print_progress({"kind": "planning"})
-                        elif last_wf_status == "assembling":
-                            print_progress({"kind": "assembling"})
-
-                    if current_wf.subtask_ids:
-                        total = len(current_wf.subtask_ids)
-                        if total > last_subtask_count:
-                            if last_subtask_count == 0 and current_wf.plan and last_wf_status != "executing":
-                                print_progress({
-                                    "kind": "plan_ready",
-                                    "plan": current_wf.plan,
-                                    "total": total,
-                                })
-                            last_subtask_count = total
-
-                        for idx, tid in enumerate(current_wf.subtask_ids, 1):
-                            st = mgr.get_task(tid)
-                            if st is None:
-                                continue
-                            if tid not in reported_subtasks and st.status == "running":
-                                reported_subtasks.add(tid)
-                                print_progress({
-                                    "kind": "subtask_running",
-                                    "index": idx,
-                                    "total": total,
-                                    "description": st.prompt[:120],
-                                    "agent_id": st.agent_id,
-                                })
-                            if tid not in reported_done and st.status == "completed":
-                                reported_done.add(tid)
-                                if tid not in reported_subtasks:
-                                    reported_subtasks.add(tid)
-                                print_progress({
-                                    "kind": "subtask_done",
-                                    "index": idx,
-                                    "total": total,
-                                })
-                            if tid not in reported_done and st.status == "failed":
-                                reported_done.add(tid)
-                                print_progress({
-                                    "kind": "subtask_failed",
-                                    "index": idx,
-                                    "total": total,
-                                    "error": st.error or "unknown",
-                                })
-
-                # Brain is waiting for user input — break to collect answer
-                if t.status == "waiting_for_input":
-                    break
-
-                # Check if brain task finished
-                if t.status in ("completed", "failed"):
-                    final_wf = mgr.db.get_workflow(wf.id)
-                    if final_wf:
-                        subtask_objs = []
-                        for tid in (final_wf.subtask_ids or []):
-                            st = mgr.get_task(tid)
-                            if st:
-                                subtask_objs.append(st)
-                        print_summary(
-                            final_wf, subtask_objs, mgr.workflow_usage(wf.id)
-                        )
-                    elif t.status == "completed":
-                        console.print(f"\n  [green]Done.[/green]")
-                        if t.result:
-                            console.print(f"  {t.result[:500]}")
-                    else:
-                        console.print(f"\n  [red]Failed: {t.error}[/red]")
-                    workflow_done = True
-                    break
-
-            # After inner loop: handle waiting_for_input or done
-            if workflow_done:
-                mgr.remove_progress_listener(on_progress)
-                break
-
-            t = mgr.get_task(brain_task_id)
-            if t and t.status == "waiting_for_input":
-                # Show Brain's questions to the user
                 console.print()
                 console.print("  [bold cyan]Brain has questions:[/bold cyan]")
-                if t.result:
+                if t and t.result:
                     for line in t.result.strip().splitlines():
                         console.print(f"  {line}")
                 console.print()
 
-                # Collect user's answer
                 answer = get_user_input(plan_mode=plan_mode)
                 if answer is None:
                     console.print("\nGoodbye!")
-                    workflow_done = True
                     break
                 answer = answer.strip()
                 if not answer:
@@ -558,15 +445,26 @@ def chat(ctx: click.Context) -> None:
 
                 console.print()
                 console.print("  [dim]Brain is continuing...[/dim]")
-
+                progress.finished.clear()
+                progress.outcome = None
                 try:
-                    mgr.resume_task(
-                        brain_task_id,
-                        answer,
-                        on_progress=on_progress,
-                    )
+                    mgr.resume_task(brain_task_id, answer)
                 except ValueError as e:
                     console.print(f"  [red]{e}[/red]")
-                    workflow_done = True
                     break
-                # Loop back to inner polling
+            final_wf = mgr.db.get_workflow(wf.id)
+            if final_wf:
+                subtasks = [
+                    st for st in mgr.db.list_workflow_tasks(wf.id) if st.id != brain_task_id
+                ]
+                print_summary(final_wf, subtasks, mgr.workflow_usage(wf.id))
+            else:
+                t = mgr.get_task(brain_task_id)
+                if t and t.status == "completed":
+                    console.print("\n  [green]Done.[/green]")
+                    if t.result:
+                        console.print(f"  {t.result[:500]}")
+                elif t:
+                    console.print(f"\n  [red]Failed: {t.error}[/red]")
+        finally:
+            mgr.remove_progress_listener(progress)

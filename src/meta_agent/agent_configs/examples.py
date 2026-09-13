@@ -30,6 +30,6 @@ REVIEWER_AGENT = AgentConfig(
     model="claude-sonnet-5",
 )
 
-BRAIN_AGENT = get_brain_config(["meta-agent", "mcp-server"])
+BRAIN_AGENT = get_brain_config()
 
 ALL_EXAMPLES = [ECHO_AGENT, CODER_AGENT, REVIEWER_AGENT, BRAIN_AGENT]

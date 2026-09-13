@@ -17,6 +17,7 @@ from meta_agent.models import AgentConfig, AgentStatus
 @pytest.fixture()
 def manager(db: Database, config) -> AgentManager:
     mgr = AgentManager(db, config.log_dir)
+    mgr.retry_base_delay_s = 0.0  # no real backoff in tests
     mgr.start()
     yield mgr
     mgr.shutdown()
@@ -35,7 +36,7 @@ def agent_config() -> AgentConfig:
 def test_register_agent(manager: AgentManager, agent_config: AgentConfig):
     state = manager.register_agent(agent_config)
     assert state.config.id == "mgr_test"
-    assert state.status == AgentStatus.STOPPED
+    assert state.status == AgentStatus.IDLE
 
 
 def test_list_agents(manager: AgentManager, agent_config: AgentConfig):
@@ -187,24 +188,96 @@ async def test_task_for_an_already_deleted_agent_fails_legibly(manager: AgentMan
     assert not stored.error.startswith("'gone01'")
 
 
-def test_failed_task_still_auto_restarts_a_surviving_agent(
+def test_auto_restart_reruns_the_same_task_until_max_restarts(
+    manager: AgentManager, agent_config: AgentConfig
+):
+    """auto_restart used to only reset the agent's status flag — the task was
+    never resubmitted, so it restarted nothing."""
+    agent_config.auto_restart = True
+    agent_config.max_restarts = 2
+    manager.register_agent(agent_config)
+    attempts = []
+    events: list[dict] = []
+    manager.add_progress_listener(events.append)
+
+    async def always_fails(**kwargs):
+        attempts.append(1)
+        raise RuntimeError("sdk blew up")
+        yield  # make it an async generator
+
+    with patch("meta_agent.agent_runner.query", side_effect=always_fails):
+        task = manager.submit_task("mgr_test", "do something")
+        assert _wait_for(lambda: manager.get_task(task.id).status == "failed")
+
+    assert len(attempts) == 3, "one initial attempt plus max_restarts retries"
+    retries = [e for e in events if e["kind"] == "task_retrying"]
+    assert [e["attempt"] for e in retries] == [1, 2]
+    assert manager.get_agent("mgr_test").restart_count == 2
+
+
+def test_auto_restart_recovers_from_a_transient_failure(
     manager: AgentManager, agent_config: AgentConfig
 ):
     agent_config.auto_restart = True
     manager.register_agent(agent_config)
+    calls = []
 
-    async def failing_query(**kwargs):
+    async def fails_once(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("transient")
+        return
+        yield  # make it an async generator
+
+    with patch("meta_agent.agent_runner.query", side_effect=fails_once):
+        task = manager.submit_task("mgr_test", "do something")
+        assert _wait_for(lambda: manager.get_task(task.id).status == "completed")
+
+    assert len(calls) == 2
+    stored = manager.get_task(task.id)
+    assert stored.error is None
+    assert manager.get_agent("mgr_test").status == AgentStatus.IDLE
+
+
+def test_a_task_is_not_retried_without_auto_restart(
+    manager: AgentManager, agent_config: AgentConfig
+):
+    manager.register_agent(agent_config)
+    attempts = []
+
+    async def always_fails(**kwargs):
+        attempts.append(1)
         raise RuntimeError("sdk blew up")
         yield  # make it an async generator
 
-    with patch("meta_agent.agent_runner.query", side_effect=failing_query):
+    with patch("meta_agent.agent_runner.query", side_effect=always_fails):
         task = manager.submit_task("mgr_test", "do something")
         assert _wait_for(lambda: manager.get_task(task.id).status == "failed")
-        assert _wait_for(lambda: manager.get_agent("mgr_test").restart_count == 1)
 
-    state = manager.get_agent("mgr_test")
-    assert state.status == AgentStatus.IDLE
-    assert state.error is None
+    assert len(attempts) == 1
+
+
+def test_max_turns_is_never_retried(manager: AgentManager, agent_config: AgentConfig):
+    """Re-running the identical prompt just burns the same budget to reach the
+    same place."""
+    from claude_agent_sdk import ResultMessage
+
+    agent_config.auto_restart = True
+    manager.register_agent(agent_config)
+    attempts = []
+
+    async def out_of_turns(**kwargs):
+        attempts.append(1)
+        yield ResultMessage(
+            subtype="error_max_turns", duration_ms=1, duration_api_ms=1, is_error=True,
+            num_turns=50, session_id="s", result=None,
+        )
+
+    with patch("meta_agent.agent_runner.query", side_effect=out_of_turns):
+        task = manager.submit_task("mgr_test", "do something")
+        assert _wait_for(lambda: manager.get_task(task.id).status == "failed")
+
+    assert len(attempts) == 1
 
 
 def test_error_context_reaches_the_stored_error(
@@ -341,3 +414,54 @@ def test_unregister_cancels_all_of_the_agents_tasks(
         assert manager.unregister_agent("mgr_test") is True
         assert _wait_for(lambda: manager.get_task(first.id).status == "cancelled")
         assert _wait_for(lambda: manager.get_task(second.id).status == "cancelled")
+
+
+# --- event delivery ---
+
+
+@pytest.mark.parametrize("terminal_kind,make_query", [
+    ("task_completed", "ok"),
+    ("task_failed", "boom"),
+])
+def test_lifecycle_events_reach_a_registered_listener(
+    manager: AgentManager, agent_config: AgentConfig, terminal_kind: str, make_query: str
+):
+    """Lifecycle events used to reach only the per-task callback, while tool
+    events reached both. Anything watching purely through add_progress_listener
+    — which is how the chat UI works — never learned a task had finished, and
+    waited forever."""
+    manager.register_agent(agent_config)
+    events: list[dict] = []
+    manager.add_progress_listener(events.append)
+
+    async def query(**kwargs):
+        if make_query == "boom":
+            raise RuntimeError("boom")
+        return
+        yield  # make it an async generator
+
+    with patch("meta_agent.agent_runner.query", side_effect=query):
+        task = manager.submit_task("mgr_test", "do something")
+        assert _wait_for(lambda: any(e.get("kind") == terminal_kind for e in events))
+
+    kinds = [e["kind"] for e in events]
+    assert "status_change" in kinds, "listener never saw the task start"
+    assert terminal_kind in kinds
+    assert all(e.get("task_id") == task.id for e in events if "task_id" in e)
+
+
+def test_a_listener_is_not_double_delivered_when_it_is_also_the_callback(
+    manager: AgentManager, agent_config: AgentConfig
+):
+    manager.register_agent(agent_config)
+    events: list[dict] = []
+
+    async def fake_query(**kwargs):
+        return
+        yield
+
+    with patch("meta_agent.agent_runner.query", side_effect=fake_query):
+        task = manager.submit_task("mgr_test", "do something", on_progress=events.append)
+        assert _wait_for(lambda: any(e.get("kind") == "task_completed" for e in events))
+
+    assert [e["kind"] for e in events].count("task_completed") == 1
