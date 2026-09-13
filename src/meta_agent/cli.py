@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import sys
 from pathlib import Path
 
@@ -192,6 +193,58 @@ def mcp_server(ctx: click.Context) -> None:
     mgr.start()
     server = create_mcp_server(mgr)
     server.run(transport="stdio")
+
+
+@main.command("eval")
+@click.option("--tasks", "tasks_path", default="evals/tasks.json",
+              type=click.Path(exists=True, dir_okay=False), help="Task set JSON")
+@click.option("--arms", default="brain,solo", help="Comma-separated arms to run")
+@click.option("--cwd", "workdir", default=None, help="Working directory for the agents")
+@click.option("--timeout", default=900.0, help="Per-run timeout in seconds")
+@click.option("--out", "out_path", default=None, type=click.Path(dir_okay=False),
+              help="Write the full JSON report here")
+@click.option("--yes", is_flag=True, help="Skip the cost confirmation")
+@click.pass_context
+def evaluate_cmd(
+    ctx: click.Context,
+    tasks_path: str,
+    arms: str,
+    workdir: str | None,
+    timeout: float,
+    out_path: str | None,
+    yes: bool,
+) -> None:
+    """Compare orchestration against a single agent on the same tasks.
+
+    Answers the question the design rests on: does an Opus Brain delegating to
+    cheaper sub-agents actually beat one agent doing the work?
+    """
+    from .evaluate import ARMS, format_report, load_tasks, run_suite
+
+    selected = tuple(a.strip() for a in arms.split(",") if a.strip())
+    unknown = [a for a in selected if a not in ARMS]
+    if unknown:
+        console.print(f"[red]Unknown arm(s): {', '.join(unknown)}. Choose from {', '.join(ARMS)}.[/red]")
+        sys.exit(1)
+
+    tasks = load_tasks(Path(tasks_path))
+    runs = len(tasks) * len(selected)
+    console.print(
+        f"[yellow]This runs {runs} real agent session(s) "
+        f"({len(tasks)} task(s) x {len(selected)} arm(s)) and bills your account.[/yellow]"
+    )
+    if not yes and not click.confirm("Continue?", default=False):
+        console.print("[dim]Aborted.[/dim]")
+        return
+
+    mgr = _make_manager(ctx.obj["data_dir"])
+    report = run_suite(mgr, tasks, arms=selected, cwd=workdir, timeout=timeout)
+
+    console.print()
+    console.print(format_report(report))
+    if out_path:
+        Path(out_path).write_text(json.dumps(report, indent=2))
+        console.print(f"\n[green]Report written to {out_path}[/green]")
 
 
 @main.command()

@@ -212,6 +212,7 @@ This runs a [FastMCP](https://github.com/modelcontextprotocol/python-sdk) server
 | `create_workflow` | Create a workflow record for orchestration |
 | `workflow_status` | Get workflow status and subtask statuses |
 | `update_workflow` | Update a workflow's state |
+| `workflow_usage` | Cost totals and a per-model breakdown for a workflow |
 | `list_workflows` | List all workflows |
 
 ## CLI Reference
@@ -229,6 +230,7 @@ Commands:
   create      Create and register a new agent
   dashboard   Serve the web dashboard (agents, tasks, Kanban board)
   delete      Delete an agent by ID
+  eval        Compare orchestration against a single agent on the same tasks
   init        Initialize the data directory and database
   list        List all registered agents
   logs        View agent logs
@@ -237,6 +239,35 @@ Commands:
   submit      Submit a task to an agent
   workflow    List workflows or show workflow detail with subtask tree
 ```
+
+## Evaluation
+
+`meta-agent eval` runs the same task set twice — once through the Brain, once
+through a single Sonnet agent — and reports pass rate, cost and wall time side
+by side. It is how you check the premise the design rests on: that delegating to
+cheaper sub-agents beats one agent doing the work.
+
+```bash
+meta-agent eval --tasks evals/tasks.json --arms brain,solo --out report.json
+```
+
+Every run bills your account, so the command states how many sessions it is
+about to start and asks first (`--yes` to skip). Tasks are JSON: an `id`, a
+`prompt`, and an optional `expect` list of substrings that must all appear in
+the final answer for the run to count as passed.
+
+A single-task smoke run (not a result — one task proves nothing about the
+premise, it just shows the shape of the output):
+
+```
+arm         pass    rate      cost $    mean $     secs   mean s
+----------------------------------------------------------------
+brain   1/1         100%      0.0403    0.0403      9.6      9.6
+solo    1/1         100%      0.0906    0.0906     10.6     10.6
+```
+
+Cost comes from the SDK's own accounting, per task and summed per workflow, so
+the comparison is measured rather than estimated.
 
 ## Agent Configuration
 
@@ -254,10 +285,10 @@ Agents are defined by an `AgentConfig` with these fields:
 | `max_budget_usd` | float \| None | `None` | Optional spending cap |
 | `mcp_servers` | dict | `{}` | External MCP servers the agent can access |
 | `use_meta_agent_mcp` | bool | `False` | Attach the in-process meta-agent MCP server at run time |
+| `auto_restart` | bool | `False` | Re-run a failed task in place, with backoff |
+| `max_restarts` | int | `3` | How many times to re-run before giving up |
 | `permission_mode` | str | `"acceptEdits"` | SDK permission mode |
 | `cwd` | str \| None | `None` | Working directory |
-| `auto_restart` | bool | `False` | Auto-recover from errors |
-| `max_restarts` | int | `3` | Max restart attempts |
 
 ### Available Tools
 
@@ -276,23 +307,28 @@ Use an empty list (`--tools ""`) for chat-only agents with no tool access.
 
 ## Agent Lifecycle
 
+A newly registered agent is `idle` — ready for work. `stopped` means
+*deliberately* stopped: submitting to a stopped agent raises.
+
 ```
-STOPPED ──(start)──> IDLE ──(task submitted)──> RUNNING
-   ^                  ^                            │
-   │                  │                            │
-   │                  └──(task completes)───────────┘
-   │                                               │
-   └──(stop)──── ERROR <──(task fails)─────────────┘
-                   │
-                   └──(auto_restart=true)──> IDLE
+       register
+          │
+          v
+IDLE ──(task submitted)──> RUNNING ──(last task completes)──> IDLE
+ ^                            │
+ │                            └──(task fails)──> ERROR
+ │                                                 │
+ │                        (auto_restart re-runs the same task, with backoff)
+ │                                                 │
+ └───────────────────(start)──── STOPPED <──(stop, cancelling in-flight tasks)
 ```
 
 | Status | Meaning |
 |--------|---------|
-| `stopped` | Agent is registered but not active |
-| `idle` | Agent is started and ready to receive tasks |
-| `running` | Agent is actively processing a task |
-| `error` | Last task failed (error message stored on agent state) |
+| `idle` | Registered and ready to receive tasks |
+| `running` | At least one task in flight (`running_task_ids` lists them all) |
+| `error` | Last task failed; still accepts work |
+| `stopped` | Deliberately stopped — refuses new tasks until started |
 
 ## Project Structure
 
