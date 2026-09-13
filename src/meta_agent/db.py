@@ -1,9 +1,10 @@
-"""SQLite database with WAL mode for agents and tasks."""
+"""SQLite storage for agents, tasks and workflows. One connection per thread."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,15 +52,46 @@ _MIGRATIONS = [
 
 
 class Database:
+    """SQLite storage with one connection PER THREAD.
+
+    A single connection opened with ``check_same_thread=False`` and no lock is
+    not safe here: AgentManager runs agents on a background event-loop thread
+    while the CLI, the MCP tools and the dashboard read from others. Sharing one
+    connection means sharing one transaction — a ``commit()`` on one thread can
+    commit another thread's half-written statement, and cursor state interleaves.
+
+    WAL is what makes a connection per thread cheap: one writer and any number
+    of concurrent readers, which is the concurrency WAL was turned on for in the
+    first place. ``busy_timeout`` covers the writer-vs-writer case.
+    """
+
     def __init__(self, db_path: Path):
         self.db_path = db_path
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.row_factory = sqlite3.Row
+        self._local = threading.local()
+        self._open_lock = threading.Lock()
+        self._open: list[sqlite3.Connection] = []
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._run_migrations()
+
+    def _new_connection(self) -> sqlite3.Connection:
+        # check_same_thread=False so close() can reach connections it did not open.
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        with self._open_lock:
+            self._open.append(conn)
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._new_connection()
+            self._local.conn = conn
+        return conn
 
     def _run_migrations(self) -> None:
         for sql in _MIGRATIONS:
@@ -70,7 +102,13 @@ class Database:
                 pass  # Column already exists
 
     def close(self) -> None:
-        self._conn.close()
+        """Close every thread's connection."""
+        with self._open_lock:
+            connections, self._open = self._open, []
+        for conn in connections:
+            conn.close()
+        # Drop the per-thread handles too, so a later call reopens cleanly.
+        self._local = threading.local()
 
     # --- Agent CRUD ---
 
