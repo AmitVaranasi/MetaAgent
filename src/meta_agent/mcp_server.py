@@ -188,6 +188,17 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
 
         return response
 
+    async def wait_for_tasks(task_ids: list[str], timeout_seconds: float = 300.0) -> dict:
+        """Wait until the given tasks finish, then return each one's status.
+
+        Use this INSTEAD of calling task_status in a loop. It returns as soon as
+        every task is done, costs you one tool call however long the work takes,
+        and does not burn context on repeated polling. Call task_status
+        afterwards only for the tasks you actually need results from.
+        """
+        capped = max(1.0, min(float(timeout_seconds), 600.0))
+        return await manager.await_tasks(list(task_ids), timeout=capped)
+
     def list_tasks(agent_id: str | None = None) -> list[dict]:
         """List tasks, optionally filtered by agent ID."""
         tasks = manager.list_tasks(agent_id)
@@ -391,6 +402,7 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
         agent_logs,
         submit_task,
         task_status,
+        wait_for_tasks,
         list_tasks,
         report_progress,
         create_workflow,
@@ -450,8 +462,10 @@ def _input_schema(fn: Callable[..., Any]) -> dict[str, Any]:
 def _as_sdk_tool(fn: Callable[..., Any]) -> SdkMcpTool[Any]:
     """Adapt a tool function to the SDK's in-process tool protocol."""
 
+    is_async = inspect.iscoroutinefunction(fn)
+
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
-        result = fn(**args)
+        result = await fn(**args) if is_async else fn(**args)
         text = result if isinstance(result, str) else json.dumps(result, default=str)
         return {"content": [{"type": "text", "text": text}]}
 

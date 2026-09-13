@@ -24,6 +24,8 @@ ProgressCallback = Callable[[dict[str, Any]], None] | None
 
 # A task in one of these states is being worked on by SOME process.
 IN_FLIGHT_STATUSES = ("pending", "running")
+# A task in one of these is finished as far as a waiter is concerned.
+TERMINAL_TASK_STATUSES = ("completed", "failed", "cancelled", "waiting_for_input", "not_found")
 # waiting_for_input is deliberately excluded: it survives a restart on purpose,
 # because task.session_id lets a later process resume the conversation.
 
@@ -251,6 +253,33 @@ class AgentManager:
             state.status = AgentStatus.STOPPED
             state.current_task_id = None
         return state
+
+    async def await_tasks(
+        self, task_ids: list[str], timeout: float = 300.0, poll: float = 0.5
+    ) -> dict[str, str]:
+        """Wait until every listed task is finished. Returns id -> final status.
+
+        The Brain has no way to sleep: told to "wait 5-10 seconds between
+        polls", the only thing it can actually emit is another tool call, so it
+        polls task_status every ~1.5s and pays Opus rates for the privilege.
+        Measured over four runs, 34-72% of its tool calls were polls.
+
+        Async, and it yields between checks: the sub-agents it is waiting on run
+        on this same event loop, so a blocking wait here would deadlock them.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            statuses = {}
+            for task_id in task_ids:
+                task = self.db.get_task(task_id)
+                statuses[task_id] = task.status if task else "not_found"
+            unfinished = [
+                tid for tid, status in statuses.items()
+                if status not in TERMINAL_TASK_STATUSES
+            ]
+            if not unfinished or time.monotonic() >= deadline:
+                return statuses
+            await asyncio.sleep(poll)
 
     def running_task_ids(self, agent_id: str) -> list[str]:
         """Task ids currently in flight for an agent."""
