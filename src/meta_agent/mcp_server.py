@@ -60,6 +60,7 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
             "system_prompt": state.config.system_prompt,
             "allowed_tools": state.config.allowed_tools,
             "current_task_id": state.current_task_id,
+            "running_task_ids": state.running_task_ids,
             "error": state.error,
             "session_id": state.session_id,
             "started_at": str(state.started_at) if state.started_at else None,
@@ -123,19 +124,16 @@ def _tool_functions(manager: AgentManager) -> list[Callable[..., Any]]:
         return {"id": agent_id, "status": state.status.value}
 
     def stop_agent(agent_id: str) -> dict:
-        """Stop an agent."""
+        """Stop an agent, cancelling every task it currently has in flight."""
         from .models import AgentStatus
 
         state = manager.get_agent(agent_id)
         if state is None:
             return {"error": f"Agent {agent_id} not found"}
-        runner = manager._runners.get(agent_id)
-        if runner and manager._loop:
-            import asyncio
-            asyncio.run_coroutine_threadsafe(runner.cancel(), manager._loop)
+        cancelled = manager.cancel_agent_tasks(agent_id)
         state.status = AgentStatus.STOPPED
         state.current_task_id = None
-        return {"id": agent_id, "status": state.status.value}
+        return {"id": agent_id, "status": state.status.value, "cancelled_task_ids": cancelled}
 
     def agent_logs(agent_id: str, lines: int = 100) -> str:
         """Get recent logs for an agent."""

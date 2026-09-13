@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from unittest.mock import patch
@@ -220,3 +221,121 @@ def test_error_context_reaches_the_stored_error(
         assert _wait_for(lambda: manager.get_task(task.id).status == "failed")
 
     assert f"model={agent_config.model}" in manager.get_task(task.id).error
+
+
+# --- more than one task in flight per agent ---
+
+
+def test_two_tasks_on_one_agent_are_both_tracked(
+    manager: AgentManager, agent_config: AgentConfig
+):
+    """self._runners[agent_id] = runner overwrote the first task's runner, so
+    the agent looked like it had one task when it had two."""
+    manager.register_agent(agent_config)
+    release = threading.Event()
+
+    async def slow_query(**kwargs):
+        release.wait(5.0)
+        return
+        yield  # make it an async generator
+
+    with patch("meta_agent.agent_runner.query", side_effect=slow_query):
+        first = manager.submit_task("mgr_test", "one")
+        second = manager.submit_task("mgr_test", "two")
+        assert _wait_for(lambda: len(manager.running_task_ids("mgr_test")) == 2)
+
+        state = manager.get_agent("mgr_test")
+        assert sorted(state.running_task_ids) == sorted([first.id, second.id])
+        assert state.status == AgentStatus.RUNNING
+
+        release.set()
+        assert _wait_for(lambda: manager.running_task_ids("mgr_test") == [])
+
+    assert manager.get_task(first.id).status == "completed"
+    assert manager.get_task(second.id).status == "completed"
+    assert manager.get_agent("mgr_test").status == AgentStatus.IDLE
+    assert manager.get_agent("mgr_test").current_task_id is None
+
+
+def test_agent_stays_running_until_its_last_task_finishes(
+    manager: AgentManager, agent_config: AgentConfig
+):
+    """The first task to finish used to clear current_task_id and flip the
+    agent to IDLE while a second task was still going."""
+    manager.register_agent(agent_config)
+    release_first = threading.Event()
+    release_second = threading.Event()
+    gates = {}
+
+    async def gated_query(**kwargs):
+        prompt = kwargs.get("prompt", "")
+        gates.setdefault(prompt, True)
+        (release_first if prompt == "one" else release_second).wait(5.0)
+        return
+        yield  # make it an async generator
+
+    with patch("meta_agent.agent_runner.query", side_effect=gated_query):
+        first = manager.submit_task("mgr_test", "one")
+        second = manager.submit_task("mgr_test", "two")
+        assert _wait_for(lambda: len(manager.running_task_ids("mgr_test")) == 2)
+
+        release_first.set()
+        assert _wait_for(lambda: manager.get_task(first.id).status == "completed")
+
+        state = manager.get_agent("mgr_test")
+        assert state.status == AgentStatus.RUNNING, "went idle with a task still running"
+        assert state.current_task_id == second.id
+
+        release_second.set()
+        assert _wait_for(lambda: manager.get_agent("mgr_test").status == AgentStatus.IDLE)
+
+
+def test_cancel_agent_tasks_cancels_every_in_flight_task(
+    manager: AgentManager, agent_config: AgentConfig
+):
+    """AgentRunner._current_task was never assigned, so cancel() was a no-op and
+    only the newest runner was reachable anyway."""
+    manager.register_agent(agent_config)
+    started = threading.Semaphore(0)
+
+    async def never_finishes(**kwargs):
+        started.release()
+        await asyncio.sleep(30)
+        return
+        yield  # make it an async generator
+
+    with patch("meta_agent.agent_runner.query", side_effect=never_finishes):
+        first = manager.submit_task("mgr_test", "one")
+        second = manager.submit_task("mgr_test", "two")
+        assert started.acquire(timeout=5) and started.acquire(timeout=5)
+
+        cancelled = manager.cancel_agent_tasks("mgr_test")
+        assert sorted(cancelled) == sorted([first.id, second.id])
+
+        assert _wait_for(lambda: manager.get_task(first.id).status == "cancelled")
+        assert _wait_for(lambda: manager.get_task(second.id).status == "cancelled")
+
+    assert manager.running_task_ids("mgr_test") == []
+    assert manager.get_agent("mgr_test").current_task_id is None
+
+
+def test_unregister_cancels_all_of_the_agents_tasks(
+    manager: AgentManager, agent_config: AgentConfig
+):
+    manager.register_agent(agent_config)
+    started = threading.Semaphore(0)
+
+    async def never_finishes(**kwargs):
+        started.release()
+        await asyncio.sleep(30)
+        return
+        yield  # make it an async generator
+
+    with patch("meta_agent.agent_runner.query", side_effect=never_finishes):
+        first = manager.submit_task("mgr_test", "one")
+        second = manager.submit_task("mgr_test", "two")
+        assert started.acquire(timeout=5) and started.acquire(timeout=5)
+
+        assert manager.unregister_agent("mgr_test") is True
+        assert _wait_for(lambda: manager.get_task(first.id).status == "cancelled")
+        assert _wait_for(lambda: manager.get_task(second.id).status == "cancelled")

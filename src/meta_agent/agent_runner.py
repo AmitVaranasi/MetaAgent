@@ -150,6 +150,9 @@ class AgentRunner:
         resume_session_id: str | None = None,
     ) -> str:
         """Internal: execute or resume a task. Returns the final result text."""
+        # Recorded so cancel() has something to cancel — it was never set, which
+        # made stop_agent and unregister_agent silent no-ops.
+        self._current_task = asyncio.current_task()
         options = self._build_options(resume_session_id=resume_session_id)
 
         result_text = ""
@@ -228,6 +231,7 @@ class AgentRunner:
         return "; ".join(parts)
 
     async def cancel(self) -> None:
-        """Cancel the currently running task."""
-        if self._current_task and not self._current_task.done():
-            self._current_task.cancel()
+        """Cancel the run this runner is driving, if it is still going."""
+        task = self._current_task
+        if task is not None and not task.done():
+            task.cancel()

@@ -7,6 +7,7 @@ import logging
 import threading
 import traceback
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,13 +22,23 @@ ProgressCallback = Callable[[dict[str, Any]], None] | None
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _Run:
+    """One in-flight task and the runner driving it."""
+
+    agent_id: str
+    runner: AgentRunner
+
+
 class AgentManager:
     def __init__(self, db: Database, log_dir: Path):
         self.db = db
         self.log_dir = log_dir
         self._lock = threading.Lock()
         self._agents: dict[str, AgentState] = {}
-        self._runners: dict[str, AgentRunner] = {}
+        # Keyed by TASK id, not agent id: an agent can legitimately have several
+        # tasks in flight, and keying by agent silently dropped all but the last.
+        self._runs: dict[str, _Run] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         # External listeners for live progress events (e.g. from report_progress MCP tool)
@@ -92,12 +103,27 @@ class AgentManager:
             state = self._agents.pop(agent_id, None)
         if state is None:
             return False
-        # Cancel any running task
-        runner = self._runners.pop(agent_id, None)
-        if runner and self._loop:
-            asyncio.run_coroutine_threadsafe(runner.cancel(), self._loop)
+        self.cancel_agent_tasks(agent_id)
         self.db.delete_agent(agent_id)
         return True
+
+    def cancel_agent_tasks(self, agent_id: str) -> list[str]:
+        """Cancel every task in flight for an agent. Returns the task ids.
+
+        Previously only the most recently submitted task could be reached, so a
+        stop or delete left the agent's earlier tasks running.
+        """
+        with self._lock:
+            runs = [(tid, run.runner) for tid, run in self._runs.items() if run.agent_id == agent_id]
+        if self._loop:
+            for _, runner in runs:
+                asyncio.run_coroutine_threadsafe(runner.cancel(), self._loop)
+        return [tid for tid, _ in runs]
+
+    def running_task_ids(self, agent_id: str) -> list[str]:
+        """Task ids currently in flight for an agent."""
+        with self._lock:
+            return [tid for tid, run in self._runs.items() if run.agent_id == agent_id]
 
     def list_agents(self) -> list[AgentState]:
         with self._lock:
@@ -133,11 +159,7 @@ class AgentManager:
         self.db.save_task(task)
 
         runner = AgentRunner(state.config, mcp_servers=self.mcp_servers_for(state.config))
-        with self._lock:
-            self._runners[agent_id] = runner
-            state.status = AgentStatus.RUNNING
-            state.current_task_id = task.id
-            state.started_at = datetime.now(timezone.utc)
+        self._start_run(agent_id, task.id, runner)
 
         if self._loop:
             asyncio.run_coroutine_threadsafe(
@@ -177,10 +199,7 @@ class AgentManager:
             raise ValueError(f"Agent {agent_id} not registered")
 
         runner = AgentRunner(state.config, mcp_servers=self.mcp_servers_for(state.config))
-        with self._lock:
-            self._runners[agent_id] = runner
-            state.status = AgentStatus.RUNNING
-            state.current_task_id = task.id
+        self._start_run(agent_id, task.id, runner)
 
         task.status = "running"
         self.db.save_task(task)
@@ -199,28 +218,52 @@ class AgentManager:
             )
         return task
 
-    def _set_agent_state(
+    def _start_run(self, agent_id: str, task_id: str, runner: AgentRunner) -> None:
+        """Register an in-flight task and mark its agent running."""
+        with self._lock:
+            self._runs[task_id] = _Run(agent_id, runner)
+            state = self._agents.get(agent_id)
+            if state is None:
+                return
+            if task_id not in state.running_task_ids:
+                state.running_task_ids.append(task_id)
+            state.status = AgentStatus.RUNNING
+            state.current_task_id = task_id
+            state.started_at = datetime.now(timezone.utc)
+
+    def _end_run(
         self,
         agent_id: str,
-        status: AgentStatus,
+        task_id: str,
+        terminal_status: AgentStatus,
         error: str | None = None,
-        clear_task: bool = False,
     ) -> AgentState | None:
-        """Update an agent's in-memory state, tolerating a deleted agent.
+        """Retire one run and settle the agent around whatever is still running.
 
-        The Brain is instructed to delete every agent it created (Phase 6), and
-        it can do that while a task is still running — so any lookup after the
-        task starts may legitimately miss. Returns the state, or None if the
-        agent is gone.
+        Tolerates a deleted agent: the Brain is instructed to delete every agent
+        it created (Phase 6) and can do that while a task is still going, so a
+        lookup after the task starts may legitimately miss. Returns the state,
+        or None if the agent is gone.
         """
         with self._lock:
+            self._runs.pop(task_id, None)
             state = self._agents.get(agent_id)
             if state is None:
                 return None
-            state.status = status
-            state.error = error
-            if clear_task:
+            if task_id in state.running_task_ids:
+                state.running_task_ids.remove(task_id)
+            if error is not None:
+                state.error = error
+            if state.running_task_ids:
+                # Other tasks are still in flight — the agent is not idle yet.
+                state.status = AgentStatus.RUNNING
+                if state.current_task_id == task_id:
+                    state.current_task_id = state.running_task_ids[-1]
+            else:
+                state.status = terminal_status
                 state.current_task_id = None
+                if error is None:
+                    state.error = None
             return state
 
     def _mark_running(self, task: Task, on_progress: ProgressCallback) -> None:
@@ -248,7 +291,7 @@ class AgentManager:
         task.error = rich_error
         task.completed_at = datetime.now(timezone.utc)
         self.db.save_task(task)
-        state = self._set_agent_state(agent_id, AgentStatus.ERROR, error=rich_error)
+        state = self._end_run(agent_id, task.id, AgentStatus.ERROR, error=rich_error)
         self._fire_progress(
             on_progress, {"kind": "task_failed", "task_id": task.id, "error": rich_error}
         )
@@ -292,7 +335,7 @@ class AgentManager:
                 task.status = "waiting_for_input"
                 task.result = result
                 self.db.save_task(task)
-                self._set_agent_state(agent_id, AgentStatus.IDLE, clear_task=True)
+                self._end_run(agent_id, task.id, AgentStatus.IDLE)
                 self._fire_progress(on_progress, {"kind": "waiting_for_input", "task_id": task.id})
                 return
 
@@ -301,7 +344,7 @@ class AgentManager:
         task.completed_at = datetime.now(timezone.utc)
         # Persist BEFORE firing callback so readers see consistent state
         self.db.save_task(task)
-        self._set_agent_state(agent_id, AgentStatus.IDLE, clear_task=True)
+        self._end_run(agent_id, task.id, AgentStatus.IDLE)
         self._fire_progress(on_progress, {"kind": "task_completed", "task_id": task.id})
 
     async def _execute_resume(
@@ -321,6 +364,16 @@ class AgentManager:
                 on_progress=self._combined_progress(on_progress),
             )
             self._finish_or_pause(agent_id, task, result, on_progress)
+        except asyncio.CancelledError:
+            # stop_agent / unregister_agent reached this task. Record it as
+            # cancelled rather than leaving it mid-flight, then let the
+            # cancellation continue to propagate.
+            task.status = "cancelled"
+            task.completed_at = datetime.now(timezone.utc)
+            self.db.save_task(task)
+            self._end_run(agent_id, task.id, AgentStatus.STOPPED)
+            self._fire_progress(on_progress, {"kind": "task_cancelled", "task_id": task.id})
+            raise
         except Exception as e:
             logger.exception("Resume task %s failed for agent %s", task.id, agent_id)
             self._record_failure(agent_id, runner, task, e, on_progress)
@@ -354,6 +407,16 @@ class AgentManager:
             # Persist session_id immediately so resume works even if we crash later
             self.db.save_task(task)
             self._finish_or_pause(agent_id, task, result, on_progress)
+        except asyncio.CancelledError:
+            # stop_agent / unregister_agent reached this task. Record it as
+            # cancelled rather than leaving it mid-flight, then let the
+            # cancellation continue to propagate.
+            task.status = "cancelled"
+            task.completed_at = datetime.now(timezone.utc)
+            self.db.save_task(task)
+            self._end_run(agent_id, task.id, AgentStatus.STOPPED)
+            self._fire_progress(on_progress, {"kind": "task_cancelled", "task_id": task.id})
+            raise
         except Exception as e:
             logger.exception("Task %s failed for agent %s", task.id, agent_id)
             state = self._record_failure(agent_id, runner, task, e, on_progress)

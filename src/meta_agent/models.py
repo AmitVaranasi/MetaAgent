@@ -44,6 +44,9 @@ class AgentState(BaseModel):
     status: AgentStatus = AgentStatus.STOPPED
     session_id: str | None = None
     current_task_id: str | None = None
+    # Every task currently in flight for this agent. current_task_id is the most
+    # recently started of these, kept for callers that only show one.
+    running_task_ids: list[str] = Field(default_factory=list)
     started_at: datetime | None = None
     error: str | None = None
     restart_count: int = 0
